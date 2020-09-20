@@ -2,6 +2,10 @@ package main
 
 import "os"
 import "fmt"
+import "strconv"
+import "strings"
+import "unicode"
+// import "log"
 import "mapreduce"
 import "container/list"
 
@@ -9,10 +13,35 @@ import "container/list"
 // key to the Map function, as in the paper; only a value,
 // which is a part of the input file contents
 func Map(value string) *list.List {
+  //  Split the words
+	split_func := func(char rune) bool {
+		return unicode.IsLetter(char) == false
+	}
+
+	words := strings.FieldsFunc(value, split_func)
+
+	// Generate words map
+	word_map := list.New()
+	for _, word := range words {
+		word_map.PushBack(mapreduce.KeyValue{word, "1"})
+	}
+
+	return word_map
 }
 
 // iterate over list and add values
 func Reduce(key string, values *list.List) string {
+  // Add up count
+	// wc := 0
+	// for e := values.Front(); e != nil; e = e.Next() {
+	// 	count, err := strconv.Atoi(e.Value.(string))
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	wc += count
+	// }
+  wc := values.Len()
+	return strconv.Itoa(wc)
 }
 
 // Can be run in 3 ways:
@@ -26,7 +55,7 @@ func main() {
     if os.Args[3] == "sequential" {
       mapreduce.RunSingle(5, 3, os.Args[2], Map, Reduce)
     } else {
-      mr := mapreduce.MakeMapReduce(5, 3, os.Args[2], os.Args[3])    
+      mr := mapreduce.MakeMapReduce(5, 3, os.Args[2], os.Args[3])
       // Wait until MR is done
       <- mr.DoneChannel
     }
