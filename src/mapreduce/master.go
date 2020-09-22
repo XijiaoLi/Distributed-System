@@ -9,7 +9,17 @@ type WorkerInfo struct {
 
 func DistributeJobs(mr *MapReduce, done_channel chan int, job_type JobType, n_jobs int, n_other_jobs int) {
   for i := 0; i < n_jobs; i++ {
-    
+    go func(job_num int) {
+      for { // wait for a free worker to finish this current job
+        worker := <-mr.registerChannel
+        var reply DoJobReply
+        args := &DoJobArgs{File: mr.file, Operation: job_type, JobNumber: job_num, NumOtherPhase: n_other_jobs}
+        call(worker, "Worker.DoJob", args, &reply)
+        done_channel <- job_num
+        mr.registerChannel <- worker
+        break
+      }
+    }(i)
   }
 }
 
