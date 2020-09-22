@@ -14,10 +14,14 @@ func DistributeJobs(mr *MapReduce, done_channel chan int, job_type JobType, n_jo
         worker := <-mr.registerChannel
         var reply DoJobReply
         args := &DoJobArgs{File: mr.file, Operation: job_type, JobNumber: job_num, NumOtherPhase: n_other_jobs}
-        call(worker, "Worker.DoJob", args, &reply)
-        done_channel <- job_num
-        mr.registerChannel <- worker
-        break
+        ok := call(worker, "Worker.DoJob", args, &reply)
+        if ok == false {
+          fmt.Printf("DoWork: RPC %s do job error\n", worker)
+        } else {
+          done_channel <- job_num
+          mr.registerChannel <- worker
+          break
+        }
       }
     }(i)
   }
