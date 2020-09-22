@@ -7,6 +7,11 @@ type WorkerInfo struct {
   // You can add definitions here.
 }
 
+func DistributeJobs(mr *MapReduce, done_channel chan int, job_type JobType, n_jobs int, n_other_jobs int) {
+  for i := 0; i < n_jobs; i++ {
+    
+  }
+}
 
 // Clean up all workers by sending a Shutdown RPC to each one of them Collect
 // the number of jobs each work has performed.
@@ -28,5 +33,18 @@ func (mr *MapReduce) KillWorkers() *list.List {
 
 func (mr *MapReduce) RunMaster() *list.List {
   // Your code here
+  done_channel := make(chan int)
+
+  //  assign map jobs
+  DistributeJobs(mr, done_channel, Map, mr.nMap, mr.nReduce)
+  for i := 0; i < mr.nMap; i++ {
+    <-done_channel
+  }
+  // assign reduce jobs
+  DistributeJobs(mr, done_channel, Reduce, mr.nReduce, mr.nMap)
+  for i := 0; i < mr.nReduce; i++ {
+    <-done_channel
+  }
+
   return mr.KillWorkers()
 }
