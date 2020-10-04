@@ -40,29 +40,46 @@ func (vs *ViewServer) replace_backup() {
 	}
 }
 
+func (vs *ViewServer) update_view(primary string, backup string) {
+	vs.curr_view.Viewnum += 1
+	vs.curr_view.Primary = primary
+	vs.curr_view.Backup = backup
+	vs.acked = false
+	vs.idle = ""
+}
+
+func (vs *ViewServer) check_server(server string) bool {
+  return (server != "") && (vs.now.Sub(vs.last_pings[server]) < grace_period)
+}
+
 //
 // server Ping RPC handler.
 //
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
   // Your code here.
+  // lock the vs
   vs.mu.Lock()
 	defer vs.mu.Unlock()
 
+  // get the server and the view number it pings
 	server := args.Me
   view_num := args.Viewnum
 
-	//  Update ping times for current server
+	//  update this server's latest ping time
 	vs.last_pings[server] = time.Now()
 
   switch server {
 	case vs.curr_view.Primary:
 		if view_num == vs.curr_view.Viewnum {
+      // if the view number equals to the current view number, mark acknowleged flag as true
 			vs.acked = true
-		} else {//if view_num == 0 {
+		} else {
+      // wrong view number - replace the primary
 			vs.replace_primary()
 		}
 	case vs.curr_view.Backup:
+    // view number is 0 (encontered a crash) - replace the backup
 		if view_num == 0 {
 			vs.replace_backup()
 		}
@@ -71,6 +88,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
        // 1st time, so make whatever as primary
 			vs.update_view(server, "")
 		} else {
+      // found a idle server
 			vs.idle = server
 		}
 	}
@@ -93,18 +111,6 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
   return nil
 }
 
-func (vs *ViewServer) update_view(primary string, backup string) {
-	vs.curr_view.Viewnum += 1
-	vs.curr_view.Primary = primary
-	vs.curr_view.Backup = backup
-	vs.acked = false
-	vs.idle = ""
-}
-
-func (vs *ViewServer) check_server(server string) bool {
-  return (server != "") && (vs.now.Sub(vs.last_pings[server]) < grace_period)
-}
-
 //
 // tick() is called once per PingInterval; it should notice
 // if servers have died or recovered, and change the view
@@ -118,6 +124,7 @@ func (vs *ViewServer) tick() {
 
   vs.now = time.Now()
 
+  // check and remove inactive server
   if !vs.check_server(vs.idle){
     vs.idle = ""
   }
