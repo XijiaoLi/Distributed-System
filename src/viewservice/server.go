@@ -17,6 +17,27 @@ type ViewServer struct {
 
 
   // Your declarations here.
+  curr_view View
+  acked bool
+  now time.Time
+  last_pings map[string]time.Time
+  idle string
+}
+
+const grace_period = DeadPings * PingInterval
+
+func (vs *ViewServer) replace_primary() {
+	if vs.acked && vs.curr_view.Backup != "" {
+		vs.update_view(vs.curr_view.Backup, vs.idle)
+    vs.idle = ""
+	}
+}
+
+func (vs *ViewServer) replace_backup() {
+	if vs.acked && vs.idle != "" {
+		vs.update_view(vs.curr_view.Primary, vs.idle)
+    vs.idle = ""
+	}
 }
 
 //
@@ -25,20 +46,64 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
   // Your code here.
+  vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	server := args.Me
+  view_num := args.Viewnum
+
+	//  Update ping times for current server
+	vs.last_pings[server] = time.Now()
+
+  switch server {
+	case vs.curr_view.Primary:
+		if view_num == vs.curr_view.Viewnum {
+			vs.acked = true
+		} else {//if view_num == 0 {
+			vs.replace_primary()
+		}
+	case vs.curr_view.Backup:
+		if view_num == 0 {
+			vs.replace_backup()
+		}
+	default:
+    if vs.curr_view.Viewnum == 0 {
+       // 1st time, so make whatever as primary
+			vs.update_view(server, "")
+		} else {
+			vs.idle = server
+		}
+	}
+
+  reply.View = vs.curr_view
 
   return nil
 }
 
-// 
+//
 // server Get() RPC handler.
 //
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
   // Your code here.
+  vs.mu.Lock()
+	defer vs.mu.Unlock()
 
+	reply.View = vs.curr_view
   return nil
 }
 
+func (vs *ViewServer) update_view(primary string, backup string) {
+	vs.curr_view.Viewnum += 1
+	vs.curr_view.Primary = primary
+	vs.curr_view.Backup = backup
+	vs.acked = false
+	vs.idle = ""
+}
+
+func (vs *ViewServer) check_server(server string) bool {
+  return (server != "") && (vs.now.Sub(vs.last_pings[server]) < grace_period)
+}
 
 //
 // tick() is called once per PingInterval; it should notice
@@ -48,7 +113,22 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
   // Your code here.
+  vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+  vs.now = time.Now()
+
+  if !vs.check_server(vs.idle){
+    vs.idle = ""
+  }
+  if !vs.check_server(vs.curr_view.Primary) {
+    vs.replace_primary()
+  }
+  if !vs.check_server(vs.curr_view.Backup) {
+    vs.replace_backup()
+  }
 }
+
 
 //
 // tell the server to shut itself down.
@@ -64,6 +144,10 @@ func StartServer(me string) *ViewServer {
   vs := new(ViewServer)
   vs.me = me
   // Your vs.* initializations here.
+  vs.curr_view = View{Viewnum: 0, Primary: "", Backup: ""}
+  vs.acked = false
+	vs.last_pings = make(map[string]time.Time)
+	vs.idle = ""
 
   // tell net/rpc about our RPC server and handlers.
   rpcs := rpc.NewServer()
