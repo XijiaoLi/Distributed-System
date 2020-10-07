@@ -17,6 +17,8 @@ type PutArgs struct {
 
   // Field names must start with capital letters,
   // otherwise RPC will break.
+  BackupReq bool
+
 }
 
 type PutReply struct {
@@ -27,11 +29,26 @@ type PutReply struct {
 type GetArgs struct {
   Key string
   // You'll have to add definitions here.
+  BackupReq bool
 }
 
 type GetReply struct {
   Err Err
   Value string
+}
+
+type SyncDbArgs struct {
+	Database map[string]string
+  Mode string
+}
+
+type SyncDbReply struct {
+	Database map[string]string
+  Mode string
+}
+
+type ReqIndex struct {
+    UUID, Num int64
 }
 
 
@@ -42,4 +59,3 @@ func hash(s string) uint32 {
   h.Write([]byte(s))
   return h.Sum32()
 }
-

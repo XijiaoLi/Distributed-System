@@ -32,24 +32,130 @@ type PBServer struct {
   done sync.WaitGroup
   finish chan interface{}
   // Your declarations here.
+  last_view viewservice.View
+  db map[string]string
+  req_memo map[ReqIndex]string
 }
 
 func (pb *PBServer) Put(args *PutArgs, reply *PutReply) error {
   // Your code here.
-  return nil
+  pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+  if args.BackupReq && pb.last_view.Backup != pb.me || !args.BackupReq && pb.last_view.Primary != pb.me {
+      reply.Err = ErrWrongServer
+      return nil
+	}
+
+  res, existed := pb.req_memo[ReqIndex{args.uuid, args.req_num}]
+
+  if existed {
+    reply.PreviousValue = res
+  } else {
+    pb.put_val(args.Key, reply)
+    pb.req_memo[ReqIndex{args.uuid, args.req_num}] = reply.PreviousValue
+
+    if !args.BackupReq && pb.last_view.Backup != "" {
+      var backup_reply PutReply
+  		for {
+  			ok := call(pb.last_view.Backup, "PBServer.Put", &PutArgs{Key: args.Key, Value: args.Value, DoHash: args.DoHash, BackupReq: true, ReqNum: args.req_num, UUID: args.uuid}, &backup_reply)
+  			if ok && backup_reply.Err != ErrWrongServer && reply.PreviousValue == backup_reply.PreviousValue {
+  				break
+  			}
+        if backup_reply.Err == ErrWrongServer {
+          pb.get_curr_view()
+        } else if reply.PreviousValue != backup_reply.PreviousValue {
+          pb.replicate_db(pb.last_view.Backup)
+        }
+  		}
+    }
+  }
+
+
+	return nil
 }
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
   // Your code here.
-  return nil
+  pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+  if args.BackupReq && pb.last_view.Backup != pb.me || !args.BackupReq && pb.last_view.Primary != pb.me {
+      reply.Err = ErrWrongServer
+      return nil
+	}
+
+  res, existed := pb.req_memo[ReqIndex{args.uuid, args.req_num}]
+
+  if existed {
+    reply.Val = res
+  } else {
+    pb.get_key(args.Key, reply)
+    pb.req_memo[ReqIndex{args.uuid, args.req_num}] = reply.Val
+
+    if !args.BackupReq && pb.last_view.Backup != "" {
+      var backup_reply GetReply
+  		for {
+  			ok := call(pb.last_view.Backup, "PBServer.Get", &GetArgs{Key: args.Key, BackupReq: true, ReqNum: args.req_num, UUID: args.uuid}, &backup_reply)
+  			if ok && backup_reply.Err != ErrWrongServer && reply.Val == backup_reply.Val {
+  				break
+  			} else if backup_reply.Err == ErrWrongServer {
+          pb.get_curr_view()
+        } else if reply.Val != backup_reply.Val {
+          pb.replicate_db(pb.last_view.Backup)
+        }
+  		}
+    }
+  }
+	return nil
 }
 
+func (pb *PBServer) put_val(key string, val string, do_hash bool, reply *GetReply) error {
+  if do_hash {
+		reply.PreviousValue, _ := pb.db[key]
+		val = hash(reply.PreviousValue + val)
+	}
+  pb.db[key] = val
+}
+
+//  get value by key from database
+func (pb *PBServer) get_key(key string, reply *GetReply) error {
+  val, ok := pb.db[key]
+	if ok {
+    reply.Value = val
+	} else {
+		reply.Err = ErrNoKey // return error and empty string if key/value pair is not not present
+	}
+}
 
 // ping the viewserver periodically.
 func (pb *PBServer) tick() {
   // Your code here.
+  pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+  pb.get_curr_view()
 }
 
+func (pb *PBServer) get_curr_view() {
+  curr_view, err := pb.vs.Ping(pb.last_view.Viewnum)
+
+  if curr_view.Viewnum != pb.last_view.Viewnum {
+    if curr_view.Primary == pb.me && curr_view.Backup != "" && curr_view.Backup != pb.last_view.Backup {
+      pb.replicate_db(curr_view.Backup)
+    }
+    pb.last_view = curr_view
+  }
+}
+
+func (pb *PBServer) replicate_db(backup string) error {
+  var reply SyncDbReply
+  for i := 0; i < 5; i++ {
+    ok := call(backup, "PBServer.SyncDb", &SyncDbArgs{Database: pb.db}, &reply) // send an RPC request
+    if ok && reply.Err == OK {
+      break
+  }
+}
 
 // tell the server to shut itself down.
 // please do not change this function.
@@ -65,6 +171,7 @@ func StartServer(vshost string, me string) *PBServer {
   pb.vs = viewservice.MakeClerk(me, vshost)
   pb.finish = make(chan interface{})
   // Your pb.* initializations here.
+  pb.db = make(map[string]string)
 
   rpcs := rpc.NewServer()
   rpcs.Register(pb)
@@ -113,13 +220,13 @@ func StartServer(vshost string, me string) *PBServer {
         fmt.Printf("PBServer(%v) accept: %v\n", me, err.Error())
         pb.kill()
       }
-    }
+    } // end for loop
     DPrintf("%s: wait until all request are done\n", pb.me)
-    pb.done.Wait() 
+    pb.done.Wait()
     // If you have an additional thread in your solution, you could
     // have it read to the finish channel to hear when to terminate.
     close(pb.finish)
-  }()
+  }() // thread
 
   pb.done.Add(1)
   go func() {
@@ -128,7 +235,7 @@ func StartServer(vshost string, me string) *PBServer {
       time.Sleep(viewservice.PingInterval)
     }
     pb.done.Done()
-  }()
+  }() // thread
 
   return pb
 }
