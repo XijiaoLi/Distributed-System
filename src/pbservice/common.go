@@ -18,7 +18,8 @@ type PutArgs struct {
   // Field names must start with capital letters,
   // otherwise RPC will break.
   BackupReq bool
-
+  UUID int64
+  ReqNum int64
 }
 
 type PutReply struct {
@@ -30,6 +31,8 @@ type GetArgs struct {
   Key string
   // You'll have to add definitions here.
   BackupReq bool
+  UUID int64
+  ReqNum int64
 }
 
 type GetReply struct {
@@ -37,20 +40,19 @@ type GetReply struct {
   Value string
 }
 
+type ReqIndex struct {
+  UUID int64
+  ReqNum int64
+}
+
 type SyncDbArgs struct {
 	Database map[string]string
-  Mode string
+  ReqMemo map[ReqIndex]string
 }
 
 type SyncDbReply struct {
-	Database map[string]string
-  Mode string
+	Err Err
 }
-
-type ReqIndex struct {
-    UUID, Num int64
-}
-
 
 // Your RPC definitions here.
 

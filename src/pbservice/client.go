@@ -7,6 +7,7 @@ import "fmt"
 // You'll probably need to uncomment these:
 import "crypto/rand"
 import "math/big"
+import "time"
 
 
 
@@ -73,22 +74,29 @@ func call(srv string, rpcname string,
 // says the key doesn't exist (has never been Put().
 //
 func (ck *Clerk) Get(key string) string {
-
   // Your code here.
-  ck.req_num += 1
+  ck.req_num += 1 // increment req number for every new request
 
 	args := &GetArgs{Key: key, BackupReq: false, ReqNum: ck.req_num, UUID: ck.uuid}
   var reply GetReply
-	for  {
-    ok := call(ck.view.Primary, "PBServer.Get", args, &reply)
-		time.Sleep(viewservice.PingInterval)
-    if ok && (reply.Err == "" || eply.Err == ErrNoKey) {
-      break
-    } else if reply.Err == ErrWrongServer {
-      ck.curr_view, _ = ck.vs.Get()
-    }
-	}
+  vs_ok := false
 
+  // send Get RPC repeeatedly
+	for {
+    // get the latest view
+    ck.curr_view, vs_ok = ck.vs.Get()
+    if !vs_ok {
+      break // if viewservice is killed, break
+    }
+
+    // send RPC request to primary
+    pr_ok := call(ck.curr_view.Primary, "PBServer.Get", args, &reply)
+    time.Sleep(100 * time.Millisecond) // wait for potential upate
+    if pr_ok && (reply.Err != ErrWrongServer) {
+      break // if request succeed, break
+    }
+    reply.Err = "" // reset error field every time
+	}
 	return reply.Value
 }
 
@@ -97,20 +105,29 @@ func (ck *Clerk) Get(key string) string {
 // must keep trying until it succeeds.
 //
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
-
   // Your code here.
-  ck.req_num += 1
+  ck.req_num += 1 // increment req number for every new request
 
   args := &PutArgs{Key: key, Value: value, DoHash: dohash, BackupReq: false, ReqNum: ck.req_num, UUID: ck.uuid}
-	var reply PutReply
-	for  {
-    ok := call(ck.view.Primary, "PBServer.Put", args, &reply)
-		time.Sleep(viewservice.PingInterval)
-    if ok && (reply.Err == "") {
-      break
-    } else if reply.Err == ErrWrongServer {
-      ck.curr_view, _ = ck.vs.Get()
+  var reply PutReply
+  vs_ok := false
+
+  // send Put RPC repeeatedly
+	for {
+    // get the latest view
+    ck.curr_view, vs_ok = ck.vs.Get()
+    if !vs_ok {
+      break // if viewservice is killed, break
     }
+
+    // send RPC request to primary
+    pr_ok := call(ck.curr_view.Primary, "PBServer.Put", args, &reply)
+    // wait for potential upate
+    time.Sleep(100 * time.Millisecond)
+    if pr_ok && (reply.Err != ErrWrongServer) {
+      break // if request succeed, break
+    }
+    reply.Err = "" // reset error field every time
 	}
 
 	return reply.PreviousValue

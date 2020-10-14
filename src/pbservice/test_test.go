@@ -51,7 +51,7 @@ func TestBasicFail(t *testing.T) {
   if vck.Primary() != s1.me {
     t.Fatal("first primary never formed view")
   }
-  
+
   ck.Put("111", "v1")
   check(ck, "111", "v1")
 
@@ -167,7 +167,7 @@ func TestAtMostOnce(t *testing.T) {
     }
     time.Sleep(viewservice.PingInterval)
   }
-  
+
   // give p+b time to ack, initialize
   time.Sleep(viewservice.PingInterval * viewservice.DeadPings)
 
@@ -313,7 +313,7 @@ func TestConcurrentSame(t *testing.T) {
     }
     time.Sleep(viewservice.PingInterval)
   }
-  
+
   // give p+b time to ack, initialize
   time.Sleep(viewservice.PingInterval * viewservice.DeadPings)
 
@@ -410,7 +410,7 @@ func TestConcurrentSameUnreliable(t *testing.T) {
     }
     time.Sleep(viewservice.PingInterval)
   }
-  
+
   // give p+b time to ack, initialize
   time.Sleep(viewservice.PingInterval * viewservice.DeadPings)
 
@@ -492,7 +492,7 @@ func TestRepeatedCrash(t *testing.T) {
   vs := viewservice.StartServer(vshost)
   time.Sleep(time.Second)
   vck := viewservice.MakeClerk("", vshost)
-  
+
   fmt.Printf("Test: Repeated failures/restarts ...\n")
 
   const nservers = 3
@@ -554,7 +554,7 @@ func TestRepeatedCrash(t *testing.T) {
         nv := strconv.Itoa(rr.Int())
         ck.Put(k, nv)
         data[k] = nv
-        // if no sleep here, then server tick() threads do not get 
+        // if no sleep here, then server tick() threads do not get
         // enough time to Ping the viewserver.
         time.Sleep(10 * time.Millisecond)
       }
@@ -598,7 +598,7 @@ func TestRepeatedCrashUnreliable(t *testing.T) {
   vs := viewservice.StartServer(vshost)
   time.Sleep(time.Second)
   vck := viewservice.MakeClerk("", vshost)
-  
+
   fmt.Printf("Test: Repeated failures/restarts; unreliable ...\n")
 
   const nservers = 3
@@ -664,7 +664,7 @@ func TestRepeatedCrashUnreliable(t *testing.T) {
         if v != data[k] {
           t.Fatalf("ck.Get(%s) returned %v but expected %v at iter %d\n", k, v, data[k], n)
         }
-        // if no sleep here, then server tick() threads do not get 
+        // if no sleep here, then server tick() threads do not get
         // enough time to Ping the viewserver.
         time.Sleep(10 * time.Millisecond)
         n++
@@ -726,7 +726,7 @@ func proxy(t *testing.T, port string, delay *int) {
       if err != nil {
         t.Fatalf("proxy dial failed: %v\n", err)
       }
-      
+
       go func() {
         for {
           buf := make([]byte, 1000)
@@ -754,7 +754,7 @@ func proxy(t *testing.T, port string, delay *int) {
           t.Fatalf("proxy c2.Write: %v\n", err1)
         }
       }
-      
+
       c1.Close()
       c2.Close()
     }
@@ -793,7 +793,7 @@ func TestPartition1(t *testing.T) {
   if v1.Primary != s1.me || v1.Backup != s2.me {
     t.Fatal("backup did not join view")
   }
-  
+
   ck1.Put("a", "1")
   check(ck1, "a", "1")
 
@@ -881,7 +881,7 @@ func TestPartition2(t *testing.T) {
   if v1.Primary != s1.me || v1.Backup != s2.me {
     t.Fatal("backup did not join view")
   }
-  
+
   ck1.Put("a", "1")
   check(ck1, "a", "1")
 

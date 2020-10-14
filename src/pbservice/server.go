@@ -10,8 +10,8 @@ import "os"
 import "syscall"
 import "math/rand"
 import "sync"
+import "strconv"
 
-//import "strconv"
 
 // Debugging
 const Debug = 0
@@ -32,9 +32,11 @@ type PBServer struct {
   done sync.WaitGroup
   finish chan interface{}
   // Your declarations here.
+  mu sync.Mutex // lock
   last_view viewservice.View
-  db map[string]string
-  req_memo map[ReqIndex]string
+  db map[string]string // kv store
+  req_memo map[ReqIndex]string // old requests, responses
+  need_update_backup bool
 }
 
 func (pb *PBServer) Put(args *PutArgs, reply *PutReply) error {
@@ -42,36 +44,31 @@ func (pb *PBServer) Put(args *PutArgs, reply *PutReply) error {
   pb.mu.Lock()
 	defer pb.mu.Unlock()
 
-  if args.BackupReq && pb.last_view.Backup != pb.me || !args.BackupReq && pb.last_view.Primary != pb.me {
-      reply.Err = ErrWrongServer
-      return nil
+  // check whether I am the correct server
+  if args.BackupReq && (pb.last_view.Backup != pb.me) || !args.BackupReq && (pb.last_view.Primary != pb.me) {
+    reply.Err = ErrWrongServer
+    return nil
 	}
 
-  res, existed := pb.req_memo[ReqIndex{args.uuid, args.req_num}]
-
+  // check whether this is a duplicated request
+  res, existed := pb.req_memo[ReqIndex{args.UUID, args.ReqNum}]
   if existed {
-    reply.PreviousValue = res
+    reply.PreviousValue = res // get the value from cache directly
   } else {
-    pb.put_val(args.Key, reply)
-    pb.req_memo[ReqIndex{args.uuid, args.req_num}] = reply.PreviousValue
+    pb.put_val(args.Key, args.Value, args.DoHash, reply)
+    pb.req_memo[ReqIndex{args.UUID, args.ReqNum}] = reply.PreviousValue // store this new request
 
+    // forward this request to backup
     if !args.BackupReq && pb.last_view.Backup != "" {
       var backup_reply PutReply
-  		for {
-  			ok := call(pb.last_view.Backup, "PBServer.Put", &PutArgs{Key: args.Key, Value: args.Value, DoHash: args.DoHash, BackupReq: true, ReqNum: args.req_num, UUID: args.uuid}, &backup_reply)
-  			if ok && backup_reply.Err != ErrWrongServer && reply.PreviousValue == backup_reply.PreviousValue {
-  				break
-  			}
-        if backup_reply.Err == ErrWrongServer {
-          pb.get_curr_view()
-        } else if reply.PreviousValue != backup_reply.PreviousValue {
-          pb.replicate_db(pb.last_view.Backup)
-        }
-  		}
+  		ok := call(pb.last_view.Backup, "PBServer.Put", &PutArgs{Key: args.Key, Value: args.Value, DoHash: args.DoHash, BackupReq: true, ReqNum: args.ReqNum, UUID: args.UUID}, &backup_reply)
+      if !ok || backup_reply.Err == ErrWrongServer {
+        pb.get_curr_view()
+      } else if reply.PreviousValue != backup_reply.PreviousValue {
+        pb.need_update_backup = true // data inconsistent; need synchronization
+      }
     }
   }
-
-
 	return nil
 }
 
@@ -80,42 +77,58 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
   pb.mu.Lock()
 	defer pb.mu.Unlock()
 
-  if args.BackupReq && pb.last_view.Backup != pb.me || !args.BackupReq && pb.last_view.Primary != pb.me {
-      reply.Err = ErrWrongServer
-      return nil
+  if args.BackupReq && (pb.last_view.Backup != pb.me) || !args.BackupReq && (pb.last_view.Primary != pb.me) {
+    reply.Err = ErrWrongServer
+    return nil
 	}
 
-  res, existed := pb.req_memo[ReqIndex{args.uuid, args.req_num}]
-
+  res, existed := pb.req_memo[ReqIndex{args.UUID, args.ReqNum}]
   if existed {
-    reply.Val = res
+    reply.Value = res
   } else {
     pb.get_key(args.Key, reply)
-    pb.req_memo[ReqIndex{args.uuid, args.req_num}] = reply.Val
+    pb.req_memo[ReqIndex{args.UUID, args.ReqNum}] = reply.Value
 
-    if !args.BackupReq && pb.last_view.Backup != "" {
+    if !args.BackupReq && (pb.last_view.Backup != ""){
       var backup_reply GetReply
-  		for {
-  			ok := call(pb.last_view.Backup, "PBServer.Get", &GetArgs{Key: args.Key, BackupReq: true, ReqNum: args.req_num, UUID: args.uuid}, &backup_reply)
-  			if ok && backup_reply.Err != ErrWrongServer && reply.Val == backup_reply.Val {
-  				break
-  			} else if backup_reply.Err == ErrWrongServer {
-          pb.get_curr_view()
-        } else if reply.Val != backup_reply.Val {
-          pb.replicate_db(pb.last_view.Backup)
-        }
-  		}
+  		ok := call(pb.last_view.Backup, "PBServer.Get", &GetArgs{Key: args.Key, BackupReq: true, ReqNum: args.ReqNum, UUID: args.UUID}, &backup_reply)
+  		if !ok || backup_reply.Err == ErrWrongServer {
+        pb.get_curr_view()
+      } else if reply.Value != backup_reply.Value {
+        pb.need_update_backup = true
+      }
     }
   }
 	return nil
 }
 
-func (pb *PBServer) put_val(key string, val string, do_hash bool, reply *GetReply) error {
+// SyncDb RPC implementation
+func (pb *PBServer) SyncDb(args *SyncDbArgs, reply *SyncDbReply) error {
+  pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	curr_view, _ := pb.vs.Ping(pb.last_view.Viewnum)
+  pb.last_view = curr_view
+
+	if curr_view.Backup != pb.me {
+		reply.Err = ErrWrongServer
+	} else {
+    pb.db = args.Database
+  	pb.req_memo = args.ReqMemo
+  }
+
+	return nil
+}
+
+//  put value by key to database
+func (pb *PBServer) put_val(key string, val string, do_hash bool, reply *PutReply) error {
   if do_hash {
-		reply.PreviousValue, _ := pb.db[key]
-		val = hash(reply.PreviousValue + val)
+		reply.PreviousValue, _ = pb.db[key]
+    h := hash(reply.PreviousValue + val)
+		val = strconv.Itoa(int(h))
 	}
   pb.db[key] = val
+  return nil
 }
 
 //  get value by key from database
@@ -124,8 +137,9 @@ func (pb *PBServer) get_key(key string, reply *GetReply) error {
 	if ok {
     reply.Value = val
 	} else {
-		reply.Err = ErrNoKey // return error and empty string if key/value pair is not not present
+		reply.Err = ErrNoKey // return error and empty string if kv pair is not not present
 	}
+  return nil
 }
 
 // ping the viewserver periodically.
@@ -135,26 +149,26 @@ func (pb *PBServer) tick() {
 	defer pb.mu.Unlock()
 
   pb.get_curr_view()
+  if pb.need_update_backup && pb.last_view.Backup != "" {
+    pb.sync_db()
+  }
 }
 
 func (pb *PBServer) get_curr_view() {
-  curr_view, err := pb.vs.Ping(pb.last_view.Viewnum)
+  curr_view, _ := pb.vs.Ping(pb.last_view.Viewnum)
 
   if curr_view.Viewnum != pb.last_view.Viewnum {
     if curr_view.Primary == pb.me && curr_view.Backup != "" && curr_view.Backup != pb.last_view.Backup {
-      pb.replicate_db(curr_view.Backup)
+      pb.need_update_backup = true
     }
     pb.last_view = curr_view
   }
 }
 
-func (pb *PBServer) replicate_db(backup string) error {
-  var reply SyncDbReply
-  for i := 0; i < 5; i++ {
-    ok := call(backup, "PBServer.SyncDb", &SyncDbArgs{Database: pb.db}, &reply) // send an RPC request
-    if ok && reply.Err == OK {
-      break
-  }
+func (pb *PBServer) sync_db() {
+  var sync_reply SyncDbReply
+  call(pb.last_view.Backup, "PBServer.SyncDb", &SyncDbArgs{Database: pb.db, ReqMemo: pb.req_memo}, &sync_reply) // send an RPC request
+  pb.need_update_backup = false
 }
 
 // tell the server to shut itself down.
@@ -171,7 +185,10 @@ func StartServer(vshost string, me string) *PBServer {
   pb.vs = viewservice.MakeClerk(me, vshost)
   pb.finish = make(chan interface{})
   // Your pb.* initializations here.
+  pb.last_view = viewservice.View{Viewnum: 0, Primary: "", Backup: ""}
   pb.db = make(map[string]string)
+  pb.req_memo = make(map[ReqIndex]string)
+  pb.need_update_backup = false
 
   rpcs := rpc.NewServer()
   rpcs.Register(pb)
