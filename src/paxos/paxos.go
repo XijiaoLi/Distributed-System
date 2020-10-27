@@ -28,6 +28,13 @@ import "syscall"
 import "sync"
 import "fmt"
 import "math/rand"
+import "time"
+
+const (
+	OK       = "OK"
+	REJECT   = "REJECT"
+)
+
 
 
 type Paxos struct {
@@ -41,6 +48,59 @@ type Paxos struct {
 
 
   // Your data here.
+  total int
+  last_min int
+  ins_memo map[int]Instance
+  peers_min_done map[int]int
+
+}
+
+type Instance struct {
+  n_p int
+  n_a int
+  v_a interface{}
+  decided bool
+}
+
+type PrepareArgs struct {
+  Seq int
+  N int
+}
+
+type PrepareReply struct {
+  Status string
+  Na int
+  Va interface{}
+  NpHint int
+}
+
+type AcceptArgs struct {
+  Seq int
+  N int
+  V interface{}
+}
+
+type AcceptReply struct {
+  Status string
+  NpHint int
+}
+
+type DecideArgs struct {
+  Seq int
+  V interface{}
+}
+
+type DecideReply struct {
+  Status string
+}
+
+type DoneArgs struct {
+  Peer int
+  Seq int
+}
+
+type DoneReply struct {
+  Status string
 }
 
 //
@@ -69,7 +129,7 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
     return false
   }
   defer c.Close()
-    
+
   err = c.Call(name, args, reply)
   if err == nil {
     return true
@@ -89,7 +149,269 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 //
 func (px *Paxos) Start(seq int, v interface{}) {
   // Your code here.
+  px.mu.Lock()
+  min := px.last_min
+  px.mu.Unlock()
+  if seq < min {
+    return
+  }
+  // log.Printf("Paxos[%v] Start seq[%v] ---------- \n", px.me, seq) //## DEBUG
+  go func() {
+    n := px.pick_n(seq)
+    // log.Printf("     pick n: %v \n", n) //## DEBUG
+    for !px.dead {
+      succeed, va, n_h := px.send_prepare(seq, n)
+      // log.Printf("     1. propose - success: %v, va: %v, nh: %v \n", succeed, va, n_h) //## DEBUG
+      if succeed {
+        if va == nil {
+          va = v
+        }
+        succeed, n_h = px.send_accept(seq, n, va)
+        // log.Printf("     2. accept - success: %v, nh: %v \n", succeed, n_h) //## DEBUG
+        if succeed {
+          px.send_decide(seq, n, va)
+          // log.Printf("     3. decided \n") //## DEBUG
+          break
+        }
+      }
+      n = px.cal_proposal_num(n_h)
+      // log.Printf("     repick n: %v\n", n) //## DEBUG
+      time.Sleep(5*time.Millisecond)
+    }
+    // log.Printf("Paxos[%v] Start-finished ---------- \n", px.me) //## DEBUG
+    return
+  }()
+
 }
+
+func (px *Paxos) send_prepare(seq int, n int) (bool, interface{}, int){
+  prepare_args := PrepareArgs{Seq: seq, N: n}
+  prepare_reply_chan := make(chan *PrepareReply)
+
+  for i, peer := range px.peers {
+    go func(i int, peer string) {
+      var prepare_reply PrepareReply
+      if i != px.me {
+        ok := call(peer, "Paxos.Prepare", &prepare_args, &prepare_reply)
+        if ok {
+          prepare_reply_chan <- &prepare_reply
+        } else {
+          prepare_reply_chan <- nil
+        }
+      } else {
+        px.Prepare(&prepare_args, &prepare_reply)
+  			prepare_reply_chan <- &prepare_reply
+      }
+    }(i, peer)
+  }
+
+  success := 0
+  max_na := -1
+  var val interface{}
+  for _ = range px.peers {
+  	re := <-prepare_reply_chan
+  	if re != nil && re.Status == OK {
+      success ++
+			if re.Va != nil && re.Na > max_na { // get the hignest accepted value
+				max_na = re.Na
+				val = re.Va
+			}
+		} else if re != nil && re.Status == REJECT {
+      if n < re.NpHint {
+        n = re.NpHint
+      }
+    }
+	}
+
+	if success > len(px.peers)/2 {
+		return true, val, n
+	} else {
+    return false, nil, n
+  }
+}
+
+func (px *Paxos) send_accept(seq int, n int, v interface{}) (bool, int){
+  accept_args := AcceptArgs{Seq: seq, N: n, V: v}
+  accept_reply_chan := make(chan *AcceptReply)
+  for i, peer := range px.peers {
+    go func(i int, peer string) {
+      var accept_reply AcceptReply
+      if i != px.me {
+        ok := call(peer, "Paxos.Accept", &accept_args, &accept_reply)
+        if ok {
+          accept_reply_chan <- &accept_reply
+        } else {
+          accept_reply_chan <- nil
+        }
+      } else {
+        px.Accept(&accept_args, &accept_reply)
+  			accept_reply_chan <- &accept_reply
+      }
+    }(i, peer)
+  }
+
+  success := 0
+  for _ = range px.peers {
+  	re := <-accept_reply_chan
+  	if re != nil && re.Status == OK {
+      success ++
+		} else if re != nil && re.Status == REJECT {
+      if n < re.NpHint {
+        n = re.NpHint
+      }
+    }
+	}
+
+  if success > len(px.peers)/2 {
+		return true, n
+	} else {
+    return false, n
+  }
+}
+
+func (px *Paxos) send_decide(seq int, n int, v interface{}) {
+  decide_args := DecideArgs{Seq: seq, V: v}
+
+  for i, peer := range px.peers {
+    go func(i int, peer string) {
+      var decide_reply DecideReply
+      if i != px.me {
+        ok := call(peer, "Paxos.Decide", &decide_args, &decide_reply)
+        if !ok {
+          // log.Printf("Paxos[%v] Decide ERR\n", i) //## DEBUG
+        }
+      } else {
+        px.Decide(&decide_args, &decide_reply)
+      }
+    }(i, peer)
+  }
+}
+
+func (px *Paxos) send_done(seq int) {
+
+		done_args := DoneArgs{Peer: px.me, Seq: seq}
+    // TODO use thread
+		for i, peer := range px.peers {
+      var done_reply DoneReply
+			if i != px.me {
+				ok := call(peer, "Paxos.SyncDone", &done_args, &done_reply)
+				if !ok {
+					// log.Printf("Paxos[%v] Done ERR\n", i) //## DEBUG
+				}
+			} else {
+        px.SyncDone(&done_args, &done_reply)
+      }
+		}
+}
+
+
+func (px *Paxos) pick_n(seq int) int {
+  hint := 0
+  px.mu.Lock()
+  ins, found := px.ins_memo[seq]
+  px.mu.Unlock()
+  if found {
+    hint = ins.n_p
+  }
+  return px.cal_proposal_num(hint)
+}
+
+func (px *Paxos) cal_proposal_num(hint int) int {
+  base := hint/px.total+1
+  return base*px.total+px.me
+}
+
+func (px *Paxos) Prepare(args *PrepareArgs, reply *PrepareReply) error {
+  px.mu.Lock()
+	defer px.mu.Unlock()
+
+  ins, found := px.ins_memo[args.Seq]
+  if !found {
+    reply.Status = OK
+    reply.Na = 0
+    reply.Va = nil
+    px.ins_memo[args.Seq] = Instance{n_p: args.N, n_a: 0, v_a: nil, decided: false}
+    // log.Printf("   Paxos[%v] Prepare seq[%v]: ok - not found\n", px.me, args.Seq) //## DEBUG
+  } else {
+    if ins.n_p < args.N {
+      reply.Status = OK
+      reply.Na = ins.n_a
+      reply.Va = ins.v_a
+      ins.n_p = args.N
+      px.ins_memo[args.Seq] = ins
+      // log.Printf("   Paxos[%v] Prepare seq[%v]: ok - higher n\n", px.me, args.Seq) //## DEBUG
+    } else {
+      reply.Status = REJECT
+      reply.NpHint = ins.n_p
+      // log.Printf("   Paxos[%v] Prepare seq[%v]: rej - %v >= %v\n", px.me, args.Seq, ins.n_p, args.N) //## DEBUG
+    }
+  }
+  return nil
+}
+
+func (px *Paxos) Accept(args *AcceptArgs, reply *AcceptReply) error {
+  px.mu.Lock()
+	defer px.mu.Unlock()
+
+  // log.Printf("   Paxos[%v] Accept seq[%v]\n", px.me, args.Seq) //## DEBUG
+
+  ins, found := px.ins_memo[args.Seq]
+  if !found {
+    reply.Status = OK
+    px.ins_memo[args.Seq] = Instance{n_p: args.N, n_a: args.N, v_a: args.V, decided: false}
+  } else {
+    if ins.n_p <= args.N {
+      reply.Status = OK
+      ins.n_p = args.N
+      ins.n_a = args.N
+      ins.v_a = args.V
+      px.ins_memo[args.Seq] = ins
+    } else {
+      reply.Status = REJECT
+      reply.NpHint = ins.n_p
+    }
+  }
+  return nil
+}
+
+func (px *Paxos) Decide(args *DecideArgs, reply *DecideReply) error {
+  px.mu.Lock()
+	defer px.mu.Unlock()
+
+  // log.Printf("   Paxos[%v] Decide seq[%v]\n", px.me, args.Seq) //## DEBUG
+
+  ins, found := px.ins_memo[args.Seq]
+  if !found {
+    px.ins_memo[args.Seq] = Instance{n_p: 0, n_a: 0, v_a: args.V, decided: true}
+  } else {
+    ins.v_a = args.V
+    ins.decided = true
+    px.ins_memo[args.Seq] = ins
+  }
+  reply.Status = OK
+  return nil
+}
+
+func (px *Paxos) SyncDone(args *DoneArgs, reply *DoneReply) error {
+  px.mu.Lock()
+	defer px.mu.Unlock()
+
+  px.peers_min_done[args.Peer] = args.Seq
+
+  min_seq := px.Min()
+  for s := 0; s < min_seq; s++ {
+    ins, found := px.ins_memo[s]
+    if found {
+      if ins.decided {
+        delete(px.ins_memo, s)
+      }
+    }
+  }
+  px.last_min = min_seq
+  reply.Status = OK
+	return nil
+}
+
 
 //
 // the application on this machine is done with
@@ -99,6 +421,11 @@ func (px *Paxos) Start(seq int, v interface{}) {
 //
 func (px *Paxos) Done(seq int) {
   // Your code here.
+  if px.peers_min_done[px.me] >= seq {
+    return
+  }
+
+  px.send_done(seq)
 }
 
 //
@@ -108,7 +435,14 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
   // Your code here.
-  return 0
+	max_seq := -1
+	for s, _ := range px.ins_memo {
+		if max_seq < s {
+			max_seq = s
+		}
+	}
+
+	return max_seq
 }
 
 //
@@ -138,10 +472,17 @@ func (px *Paxos) Max() int {
 // life, it will need to catch up on instances that it
 // missed -- the other peers therefor cannot forget these
 // instances.
-// 
+//
 func (px *Paxos) Min() int {
   // You code here.
-  return 0
+  min_seq := px.peers_min_done[0]
+	for _, s := range px.peers_min_done {
+		if min_seq > s {
+			min_seq = s
+		}
+	}
+
+	return min_seq+1
 }
 
 //
@@ -153,6 +494,15 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (bool, interface{}) {
   // Your code here.
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	ins, found := px.ins_memo[seq]
+	if found && ins.decided {
+    // log.Printf("Paxos[%v] decided seq[%v] \n", px.me, seq) //## DEBUG
+		return true, ins.v_a
+	}
+  // log.Printf("Paxos[%v] undecided seq[%v], current memo: %v \n", px.me, seq, px.ins_memo) //## DEBUG
   return false, nil
 }
 
@@ -181,6 +531,13 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 
 
   // Your initialization code here.
+  px.total = len(peers)
+  px.last_min = 0
+  px.ins_memo = make(map[int]Instance)
+  px.peers_min_done = make(map[int]int)
+  for i := 0; i < px.total; i++ {
+    px.peers_min_done[i] = -1
+  }
 
   if rpcs != nil {
     // caller will create socket &c
@@ -197,10 +554,10 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
       log.Fatal("listen error: ", e);
     }
     px.l = l
-    
+
     // please do not change any of the following code,
     // or do anything to subvert it.
-    
+
     // create a thread to accept RPC connections
     go func() {
       for px.dead == false {
