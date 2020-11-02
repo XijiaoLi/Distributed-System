@@ -88,18 +88,11 @@ type AcceptReply struct {
 type DecideArgs struct {
   Seq int
   V interface{}
+	Peer int
+	Done int
 }
 
 type DecideReply struct {
-  Status string
-}
-
-type DoneArgs struct {
-  Peer int
-  Seq int
-}
-
-type DoneReply struct {
   Status string
 }
 
@@ -176,7 +169,7 @@ func (px *Paxos) Start(seq int, v interface{}) {
       }
       n = px.cal_proposal_num(n_h)
       // log.Printf("     repick n: %v\n", n) //## DEBUG
-      time.Sleep(5*time.Millisecond)
+      time.Sleep(time.Duration(rand.Intn(10)+1)*time.Millisecond)
     }
     // log.Printf("Paxos[%v] Start-finished ---------- \n", px.me) //## DEBUG
     return
@@ -270,7 +263,7 @@ func (px *Paxos) send_accept(seq int, n int, v interface{}) (bool, int){
 }
 
 func (px *Paxos) send_decide(seq int, n int, v interface{}) {
-  decide_args := DecideArgs{Seq: seq, V: v}
+  decide_args := DecideArgs{Seq: seq, V: v, Peer: px.me, Done: px.peers_min_done[px.me]}
 
   for i, peer := range px.peers {
     go func(i int, peer string) {
@@ -286,24 +279,6 @@ func (px *Paxos) send_decide(seq int, n int, v interface{}) {
     }(i, peer)
   }
 }
-
-func (px *Paxos) send_done(seq int) {
-
-		done_args := DoneArgs{Peer: px.me, Seq: seq}
-    // TODO use thread
-		for i, peer := range px.peers {
-      var done_reply DoneReply
-			if i != px.me {
-				ok := call(peer, "Paxos.SyncDone", &done_args, &done_reply)
-				if !ok {
-					// log.Printf("Paxos[%v] Done ERR\n", i) //## DEBUG
-				}
-			} else {
-        px.SyncDone(&done_args, &done_reply)
-      }
-		}
-}
-
 
 func (px *Paxos) pick_n(seq int) int {
   hint := 0
@@ -388,30 +363,11 @@ func (px *Paxos) Decide(args *DecideArgs, reply *DecideReply) error {
     ins.decided = true
     px.ins_memo[args.Seq] = ins
   }
+	px.peers_min_done[args.Peer] = args.Done
+
   reply.Status = OK
   return nil
 }
-
-func (px *Paxos) SyncDone(args *DoneArgs, reply *DoneReply) error {
-  px.mu.Lock()
-	defer px.mu.Unlock()
-
-  px.peers_min_done[args.Peer] = args.Seq
-
-  min_seq := px.Min()
-  for s := 0; s < min_seq; s++ {
-    ins, found := px.ins_memo[s]
-    if found {
-      if ins.decided {
-        delete(px.ins_memo, s)
-      }
-    }
-  }
-  px.last_min = min_seq
-  reply.Status = OK
-	return nil
-}
-
 
 //
 // the application on this machine is done with
@@ -421,11 +377,12 @@ func (px *Paxos) SyncDone(args *DoneArgs, reply *DoneReply) error {
 //
 func (px *Paxos) Done(seq int) {
   // Your code here.
-  if px.peers_min_done[px.me] >= seq {
-    return
-  }
+	px.mu.Lock()
+	defer px.mu.Unlock()
 
-  px.send_done(seq)
+  if px.peers_min_done[px.me] < seq {
+    px.peers_min_done[px.me] = seq
+  }
 }
 
 //
@@ -435,6 +392,9 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
   // Your code here.
+	px.mu.Lock()
+  defer px.mu.Unlock()
+
 	max_seq := -1
 	for s, _ := range px.ins_memo {
 		if max_seq < s {
@@ -475,10 +435,20 @@ func (px *Paxos) Max() int {
 //
 func (px *Paxos) Min() int {
   // You code here.
-  min_seq := px.peers_min_done[0]
+	px.mu.Lock()
+  defer px.mu.Unlock()
+
+	min_seq := px.peers_min_done[0]
 	for _, s := range px.peers_min_done {
 		if min_seq > s {
 			min_seq = s
+		}
+	}
+
+	for s := 0; s < min_seq; s++ {
+		ins, found := px.ins_memo[s]
+		if found && ins.decided {
+			delete(px.ins_memo, s)
 		}
 	}
 
@@ -496,7 +466,7 @@ func (px *Paxos) Status(seq int) (bool, interface{}) {
   // Your code here.
 	px.mu.Lock()
 	defer px.mu.Unlock()
-
+	
 	ins, found := px.ins_memo[seq]
 	if found && ins.decided {
     // log.Printf("Paxos[%v] decided seq[%v] \n", px.me, seq) //## DEBUG
