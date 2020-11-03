@@ -167,6 +167,12 @@ func (px *Paxos) Start(seq int, v interface{}) {
           break
         }
       }
+
+		  decided, _ := px.Status(seq)
+			if decided {
+				return
+			}
+
       n = px.cal_proposal_num(n_h)
       // log.Printf("     repick n: %v\n", n) //## DEBUG
       time.Sleep(time.Duration(rand.Intn(10)+1)*time.Millisecond)
@@ -466,7 +472,7 @@ func (px *Paxos) Status(seq int) (bool, interface{}) {
   // Your code here.
 	px.mu.Lock()
 	defer px.mu.Unlock()
-	
+
 	ins, found := px.ins_memo[seq]
 	if found && ins.decided {
     // log.Printf("Paxos[%v] decided seq[%v] \n", px.me, seq) //## DEBUG
