@@ -269,7 +269,9 @@ func (px *Paxos) send_accept(seq int, n int, v interface{}) (bool, int){
 }
 
 func (px *Paxos) send_decide(seq int, n int, v interface{}) {
+	px.mu.Lock()
   decide_args := DecideArgs{Seq: seq, V: v, Peer: px.me, Done: px.peers_min_done[px.me]}
+	px.mu.Unlock()
 
   for i, peer := range px.peers {
     go func(i int, peer string) {
