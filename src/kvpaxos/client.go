@@ -2,10 +2,13 @@ package kvpaxos
 
 import "net/rpc"
 import "fmt"
+import "time"
 
 type Clerk struct {
   servers []string
   // You will have to modify this struct.
+  uuid int64
+  req_num int64
 }
 
 
@@ -13,6 +16,8 @@ func MakeClerk(servers []string) *Clerk {
   ck := new(Clerk)
   ck.servers = servers
   // You'll have to add code here.
+  ck.uuid = nrand()
+  ck.req_num = 0
   return ck
 }
 
@@ -39,7 +44,7 @@ func call(srv string, rpcname string,
     return false
   }
   defer c.Close()
-    
+
   err := c.Call(rpcname, args, reply)
   if err == nil {
     return true
@@ -56,7 +61,21 @@ func call(srv string, rpcname string,
 //
 func (ck *Clerk) Get(key string) string {
   // You will have to modify this function.
-  return ""
+  ck.req_num += 1
+  args := &GetArgs{Key: key, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
+  var reply GetReply
+
+	ok := false
+	for !ok {
+		for _, server := range ck.servers {
+			ok = call(server, "KVPaxos.Get", args, &reply)
+			if !ok {
+				time.Sleep(time.Millisecond * 50)
+			}
+		}
+	}
+
+	return reply.Value
 }
 
 //
@@ -65,7 +84,20 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
   // You will have to modify this function.
-  return ""
+  ck.req_num += 1
+	args := &PutArgs{Key: key, Value: value, DoHash: dohash, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}  //  generate unique request ID to handle dup requests
+	var reply PutReply
+
+	ok := false
+	for !ok {
+		for _, server := range ck.servers {
+			ok = call(server, "KVPaxos.Put", args, &reply)
+			if !ok {
+				time.Sleep(time.Millisecond * 50)
+			}
+		}
+	}
+  return reply.PreviousValue
 }
 
 func (ck *Clerk) Put(key string, value string) {
