@@ -218,7 +218,7 @@ func TestBasic(t *testing.T) {
   gids := make([]int64, npara)
   var ca [npara]chan bool
   for xi := 0; xi < npara; xi++ {
-    gids[xi] = int64(xi+1)
+    gids[xi] = int64(xi+1024)
     ca[xi] = make(chan bool)
     go func(i int) {
       defer func() { ca[i] <- true }()
@@ -231,6 +231,7 @@ func TestBasic(t *testing.T) {
   for i := 0; i < npara; i++ {
     <- ca[i]
   }
+  ck.Leave(gid2)
   check(t, gids, ck)
 
   fmt.Printf("  ... Passed\n")
