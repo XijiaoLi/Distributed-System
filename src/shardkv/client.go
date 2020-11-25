@@ -11,6 +11,8 @@ type Clerk struct {
   sm *shardmaster.Clerk
   config shardmaster.Config
   // You'll have to modify Clerk.
+  uuid int64
+  req_num int
 }
 
 
@@ -19,6 +21,8 @@ func MakeClerk(shardmasters []string) *Clerk {
   ck := new(Clerk)
   ck.sm = shardmaster.MakeClerk(shardmasters)
   // You'll have to modify MakeClerk.
+  ck.uuid = nrand()
+  ck.req_num = 0
   return ck
 }
 
@@ -45,7 +49,7 @@ func call(srv string, rpcname string,
     return false
   }
   defer c.Close()
-    
+
   err := c.Call(rpcname, args, reply)
   if err == nil {
     return true
@@ -79,73 +83,87 @@ func (ck *Clerk) Get(key string) string {
   defer ck.mu.Unlock()
 
   // You'll have to modify Get().
+  ck.req_num += 1
+  args := &GetArgs{Key: key, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
 
   for {
+    // ck.config = ck.sm.Query(-1)
     shard := key2shard(key)
-
     gid := ck.config.Shards[shard]
-
     servers, ok := ck.config.Groups[gid]
 
     if ok {
       // try each server in the shard's replication group.
       for _, srv := range servers {
-        args := &GetArgs{}
-        args.Key = key
         var reply GetReply
+        fmt.Printf("C GET srv[%v] key: %v\n", srv, args.Key)
         ok := call(srv, "ShardKV.Get", args, &reply)
         if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+          fmt.Printf("C GET srv[%v] successfully \n", srv)
           return reply.Value
         }
         if ok && (reply.Err == ErrWrongGroup) {
+          fmt.Printf("C GET srv[%v] ErrWrongGroup \n", srv)
           break
+        }
+        if !ok {
+          fmt.Printf("C GET srv[%v] done\n", srv)
         }
       }
     }
 
-    time.Sleep(100 * time.Millisecond)
+    time.Sleep(10 * time.Millisecond)
 
     // ask master for a new configuration.
+    fmt.Printf("C query begin\n")
     ck.config = ck.sm.Query(-1)
+    fmt.Printf("C query end\n")
+
   }
   return ""
 }
 
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
+  fmt.Printf("---------- client put lock start\n")
   ck.mu.Lock()
   defer ck.mu.Unlock()
+  fmt.Printf("---------- client put lock end\n")
 
   // You'll have to modify Put().
+  ck.req_num += 1
+	args := &PutArgs{Key: key, Value: value, DoHash: dohash, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
 
   for {
     shard := key2shard(key)
-
     gid := ck.config.Shards[shard]
-
     servers, ok := ck.config.Groups[gid]
 
     if ok {
+      fmt.Printf("---------- client put start\n")
       // try each server in the shard's replication group.
       for _, srv := range servers {
-        args := &PutArgs{}
-        args.Key = key
-        args.Value = value
-        args.DoHash = dohash
         var reply PutReply
+        fmt.Printf("C PUT srv[%v] key: %v\n", srv, args.Key)
         ok := call(srv, "ShardKV.Put", args, &reply)
         if ok && reply.Err == OK {
+          fmt.Printf("---------- client put end\n")
           return reply.PreviousValue
         }
         if ok && (reply.Err == ErrWrongGroup) {
+          fmt.Printf("---------- client put end\n")
           break
         }
+        fmt.Printf("---------- client put change another server\n")
       }
     }
 
-    time.Sleep(100 * time.Millisecond)
+
+    time.Sleep(10 * time.Millisecond)
 
     // ask master for a new configuration.
+    fmt.Printf("C query begin\n")
     ck.config = ck.sm.Query(-1)
+    fmt.Printf("C query end\n")
   }
 }
 
