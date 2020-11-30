@@ -44,7 +44,7 @@ func cleanup(sa [][]*ShardKV) {
 
 func setup(tag string, unreliable bool) ([]string, []int64, [][]string, [][]*ShardKV, func()) {
   runtime.GOMAXPROCS(4)
-  
+
   const nmasters = 3
   var sma []*shardmaster.ShardMaster = make([]*shardmaster.ShardMaster, nmasters)
   var smh []string = make([]string, nmasters)
@@ -81,6 +81,8 @@ func setup(tag string, unreliable bool) ([]string, []int64, [][]string, [][]*Sha
 
 func TestBasic(t *testing.T) {
   smh, gids, ha, _, clean := setup("basic", false)
+  fmt.Printf("%v\n----------\n%v\n----------\n%v\n\n", smh, gids, ha)
+
   defer clean()
 
   fmt.Printf("Test: Basic Join/Leave ...\n")
@@ -106,6 +108,7 @@ func TestBasic(t *testing.T) {
     keys[i] = strconv.Itoa(rand.Int())
     vals[i] = strconv.Itoa(rand.Int())
     ck.Put(keys[i], vals[i])
+    fmt.Printf("Test put\n")
   }
 
   // are keys still there after joins?
@@ -122,7 +125,7 @@ func TestBasic(t *testing.T) {
       ck.Put(keys[i], vals[i])
     }
   }
-  
+
   // are keys still there after leaves?
   for g := 0; g < len(gids)-1; g++ {
     mck.Leave(gids[g])
@@ -160,7 +163,7 @@ func TestMove(t *testing.T) {
   // add group 1.
   mck.Join(gids[1], ha[1])
   time.Sleep(5 * time.Second)
-  
+
   // check that keys are still there.
   for i := 0; i < shardmaster.NShards; i++ {
     if ck.Get(string('0'+i)) != string('0'+i) {
@@ -224,12 +227,14 @@ func TestLimp(t *testing.T) {
   for i := 0; i < len(keys); i++ {
     keys[i] = strconv.Itoa(rand.Int())
     vals[i] = strconv.Itoa(rand.Int())
+    fmt.Printf("Test put\n")
     ck.Put(keys[i], vals[i])
   }
 
   // are keys still there after joins?
   for g := 1; g < len(gids); g++ {
     mck.Join(gids[g], ha[g])
+    fmt.Printf("\n------------ %v ---------------\n\n", ha[g])
     time.Sleep(1 * time.Second)
     for i := 0; i < len(keys); i++ {
       v := ck.Get(keys[i])
@@ -239,14 +244,16 @@ func TestLimp(t *testing.T) {
       }
       vals[i] = strconv.Itoa(rand.Int())
       ck.Put(keys[i], vals[i])
+      fmt.Printf("----- test1 ----- [%v][%v]\n", g, i)
     }
   }
-  
+
   // are keys still there after leaves?
   for g := 0; g < len(gids)-1; g++ {
     mck.Leave(gids[g])
     time.Sleep(2 * time.Second)
     for i := 0; i < len(sa[g]); i++ {
+      fmt.Printf("server killed [%v]\n", ha[g][i])
       sa[g][i].kill()
     }
     for i := 0; i < len(keys); i++ {
@@ -257,6 +264,7 @@ func TestLimp(t *testing.T) {
       }
       vals[i] = strconv.Itoa(rand.Int())
       ck.Put(keys[i], vals[i])
+      fmt.Printf("----- test2 ----- [%v][%v]\n", g, i)
     }
   }
 
