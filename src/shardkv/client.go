@@ -81,16 +81,17 @@ func key2shard(key string) int {
 // keeps trying forever in the face of all other errors.
 //
 func (ck *Clerk) Get(key string) string {
+  shard := key2shard(key)
+
   ck.mu.Lock()
   defer ck.mu.Unlock()
 
   // You'll have to modify Get().
   ck.req_num += 1
-  args := &GetArgs{Key: key, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
+  args := &GetArgs{Key: key, Shard: shard, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
 
   for {
     // ck.config = ck.sm.Query(-1)
-    shard := key2shard(key)
     gid := ck.config.Shards[shard]
     servers, ok := ck.config.Groups[gid]
 
@@ -119,15 +120,16 @@ func (ck *Clerk) Get(key string) string {
 
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
 
+  shard := key2shard(key)
+
   ck.mu.Lock()
   defer ck.mu.Unlock()
 
   // You'll have to modify Put().
   ck.req_num += 1
-	args := &PutArgs{Key: key, Value: value, DoHash: dohash, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
+	args := &PutArgs{Key: key, Shard: shard, Value: value, DoHash: dohash, Req: ReqIndex{ReqNum: ck.req_num, UUID: ck.uuid}}
 
   for {
-    shard := key2shard(key)
     gid := ck.config.Shards[shard]
     servers, ok := ck.config.Groups[gid]
 

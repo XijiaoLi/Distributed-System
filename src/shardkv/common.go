@@ -26,6 +26,7 @@ type Err string
 
 type PutArgs struct {
   Key string
+  Shard int
   Value string
   DoHash bool  // For PutHash
   // You'll have to add definitions here.
@@ -42,6 +43,7 @@ type PutReply struct {
 type GetArgs struct {
   Key string
   // You'll have to add definitions here.
+  Shard int
   Req ReqIndex
 }
 
@@ -58,6 +60,7 @@ type SyncArgs struct {
 type SyncReply struct {
   Err Err
   DBCopy map[string]string
+  ReqCopy map[ReqIndex]GeneralReply
   // ReqCopy map[ReqIndex]GeneralReply
 }
 

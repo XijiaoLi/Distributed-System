@@ -37,7 +37,7 @@ type Op struct {
 
 type ShardKV struct {
   mu sync.Mutex
-  last_seq_mu sync.Mutex
+  seq_mu sync.Mutex
   l net.Listener
   me int
   dead bool // for testing
@@ -50,14 +50,17 @@ type ShardKV struct {
   // Your definitions here.
   last_cfig shardmaster.Config
   db_memo map[int]map[string]string
+  old_req_memo map[int]map[ReqIndex]GeneralReply
   req_memo map[ReqIndex]GeneralReply
   db map[string]string
   last_seq int
   req_num int
   name string
-  config_mu sync.Mutex
+  config_mu sync.RWMutex
   req_memo_mu sync.Mutex
-  db_memo_mu sync.Mutex
+  sync_mu sync.Mutex
+  db_mu sync.Mutex
+  newest_cfig_num int
 
 }
 
@@ -65,10 +68,9 @@ type ShardKV struct {
 // ------------------------------------------------
 
 func (kv *ShardKV) update_config(latest int) {
-  // log.Printf("Log UPD req%v\n", op.Req)
-  log.Printf("[%v] update_config \n", kv.name)
+  log.Printf("[%v] update_config wait mu *** \n", kv.name)
   kv.config_mu.Lock()
-  log.Printf("[%v] update_config get config_mu\n", kv.name)
+  log.Printf("[%v] update_config gett mu *** \n", kv.name)
   config := kv.last_cfig
 
   for config.Num < latest {
@@ -77,24 +79,39 @@ func (kv *ShardKV) update_config(latest int) {
 			continue
 		}
 
-    log.Printf("[%v] update_config curr ConfigNum query!!!! [%v]\n", kv.name, config.Num)
+    log.Printf("[%v] update_config curr ConfigNum query === [%v]\n", kv.name, config.Num)
     next_cfig := kv.sm.Query(config.Num + 1)
-    log.Printf("[%v] update_config curr ConfigNum query end!!!![%v]\n", kv.name, config.Num)
+    log.Printf("[%v] update_config curr ConfigNum query end === [%v]\n", kv.name, config.Num)
 
-    go func(config shardmaster.Config){
-      db_copy := make(map[string]string)
-      for k, v := range kv.db {
-        if config.Shards[key2shard(k)] == kv.gid {
-          db_copy[k] = v
-        }
+    db_copy := make(map[string]string)
+
+    kv.db_mu.Lock()
+    for k, v := range kv.db {
+      if config.Shards[key2shard(k)] == kv.gid {
+        db_copy[k] = v
       }
-      kv.db_memo_mu.Lock()
-      // log.Printf("[%v] update_config get db_memo_mu\n", kv.name)
-      kv.db_memo[config.Num] = db_copy
-      kv.db_memo_mu.Unlock()
-    }(config)
+    }
+    kv.db_mu.Unlock()
 
-    // log.Printf("[%v] update_config copied my db\n", kv.name)
+    kv.sync_mu.Lock()
+    kv.db_memo[config.Num] = db_copy
+    kv.sync_mu.Unlock()
+
+    old_req_copy := make(map[ReqIndex]GeneralReply)
+
+    kv.req_memo_mu.Lock()
+    for req, rep := range kv.req_memo {
+      if req.UUID != 0 {
+        old_req_copy[req] = rep
+      }
+    }
+    kv.req_memo_mu.Unlock()
+
+    kv.sync_mu.Lock()
+    kv.old_req_memo[config.Num] = old_req_copy
+    kv.sync_mu.Unlock()
+
+    log.Printf("[%v] update_config copied my db\n", kv.name)
 
     ga := make(map[int64]bool)
 
@@ -109,9 +126,18 @@ func (kv *ShardKV) update_config(latest int) {
             var reply SyncReply
             ok := call(old_server, "ShardKV.Sync", args, &reply)
             if ok && reply.Err == OK {
+              kv.db_mu.Lock()
               for k, v := range reply.DBCopy {
                 kv.db[k] = v
-      				}
+              }
+              kv.db_mu.Unlock()
+
+              kv.req_memo_mu.Lock()
+              for req, rep := range reply.ReqCopy {
+                kv.req_memo[req] = rep
+              }
+              kv.req_memo_mu.Unlock()
+
               done = true
               break
             }
@@ -128,6 +154,14 @@ func (kv *ShardKV) update_config(latest int) {
 }
 
 func (kv *ShardKV) interpret_log(op Op) {
+
+  kv.req_memo_mu.Lock()
+  _, existed := kv.req_memo[op.Req]
+  kv.req_memo_mu.Unlock()
+
+  if existed {
+    return
+  }
 
   var reply GeneralReply
 
@@ -149,7 +183,7 @@ func (kv *ShardKV) interpret_log(op Op) {
       reply.Err = ErrNoKey
     }
 
-    log.Printf("[%v] Log GET req%v key[%v] val[%v] shard[%v] rg \n", kv.name, op.Req, op.Key, reply.Value, op.Shard)
+    log.Printf("[%v] Log GET req%v key[%v] val[%v] shard[%v] ok \n", kv.name, op.Req, op.Key, reply.Value, op.Shard)
   case PUT:
 
     gid := kv.last_cfig.Shards[op.Shard]
@@ -162,7 +196,7 @@ func (kv *ShardKV) interpret_log(op Op) {
     kv.db[op.Key] = op.Val
     reply.Err = OK
 
-    log.Printf("[%v] Log PUT req%v key[%v] val[%v] shard[%v] rg \n", kv.name, op.Req, op.Key, op.Val, op.Shard)
+    log.Printf("[%v] Log PUT req%v key[%v] val[%v] shard[%v] ok \n", kv.name, op.Req, op.Key, op.Val, op.Shard)
   case PUTHASH:
 
     gid := kv.last_cfig.Shards[op.Shard]
@@ -177,33 +211,45 @@ func (kv *ShardKV) interpret_log(op Op) {
     kv.db[op.Key] = strconv.Itoa(int(h))
     reply.Err = OK
 
-    log.Printf("[%v]Log PHA req%v key[%v] val[%v]-[%v] shard[%v] wg \n", kv.name, op.Req, op.Key, op.Val, reply.Value, op.Shard)
+    log.Printf("[%v]Log PHA req%v key[%v] val[%v]-[%v] shard[%v] ok \n", kv.name, op.Req, op.Key, op.Val, reply.Value, op.Shard)
   case CONFIG:
     log.Printf("[%v] Log UPD req%v\n", kv.name, op.Req)
     kv.update_config(op.ConfigNum)
     log.Printf("[%v] Log UPD req%v done! \n", kv.name, op.Req)
   }
 
-  kv.req_memo_mu.Lock()
-  log.Printf("[%v] Log LOG reply for req%v\n", kv.name, op.Req)
-  kv.req_memo[op.Req] = reply
-  kv.req_memo_mu.Unlock()
+  log.Printf("[%v] Log DONE for req%v\n", kv.name, op.Req)
+  if reply.Err != ErrWrongGroup {
+    log.Printf("[%v] Log LOG for req%v\n", kv.name, op.Req)
+    kv.req_memo_mu.Lock()
+    log.Printf("[%v] Log LOG for req%v DONE!\n", kv.name, op.Req)
+    kv.req_memo[op.Req] = reply
+    kv.req_memo_mu.Unlock()
+  }
 }
 
 func (kv *ShardKV) catch_up(op Op) GeneralReply {
+  log.Printf("[%v]     catch_up for req%v waiting for lock\n", kv.name, op.Req)
 
   var decided bool
   var logger interface{}
+  seq := 0
+
+  kv.mu.Lock()
+  defer kv.mu.Unlock()
 
   for {
+    kv.seq_mu.Lock()
     kv.last_seq ++
+    seq = kv.last_seq
+    kv.seq_mu.Unlock()
 
-    decided, logger = kv.px.Status(kv.last_seq)
+    decided, logger = kv.px.Status(seq)
     if !decided {
-      kv.px.Start(kv.last_seq, op)
-      nap := 5 * time.Millisecond
+      kv.px.Start(seq, op)
+      nap := 10 * time.Millisecond
       for {
-        decided, logger = kv.px.Status(kv.last_seq)
+        decided, logger = kv.px.Status(seq)
         if decided {
           break
         }
@@ -222,7 +268,7 @@ func (kv *ShardKV) catch_up(op Op) GeneralReply {
 
   log.Printf("[%v]     finished catch_up for req%v\n", kv.name, op.Req)
 
-  kv.px.Done(kv.last_seq-1)
+  kv.px.Done(seq-1)
 
   kv.req_memo_mu.Lock()
   log.Printf("[%v]     catch_up return val for req%v\n", kv.name, op.Req)
@@ -251,9 +297,6 @@ func (kv *ShardKV) free_req(curr_req ReqIndex) {
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
 
   // Your code here.
-  if kv.dead {
-		return nil
-	}
 
   kv.req_memo_mu.Lock()
   result, existed := kv.req_memo[args.Req]
@@ -261,15 +304,18 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
 
   log.Printf("[%v]     GET req%v key[%v] existed[%v]\n", kv.name, args.Req, args.Key, existed)
 
-  if !existed || result.Err == ErrWrongGroup {
-    shard := key2shard(args.Key)
-    kv.mu.Lock()
-    result, existed = kv.req_memo[args.Req]
-    if !existed || result.Err == ErrWrongGroup {
-      op := Op{Operation: GET, Key: args.Key, Req: args.Req, Shard: shard}
+  if !existed {
+    kv.config_mu.Lock()
+    gid := kv.last_cfig.Shards[args.Shard]
+    kv.config_mu.Unlock()
+
+    if kv.gid == gid {
+      op := Op{Operation: GET, Key: args.Key, Req: args.Req, Shard: args.Shard}
       result = kv.catch_up(op)
+    } else {
+      reply.Err = ErrWrongGroup
+      return nil
     }
-    kv.mu.Unlock()
   }
 
   reply.Err = result.Err
@@ -285,9 +331,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
 func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 
   // Your code here.
-  if kv.dead {
-		return nil
-	}
 
   kv.req_memo_mu.Lock()
   result, existed := kv.req_memo[args.Req]
@@ -295,19 +338,22 @@ func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 
   log.Printf("[%v]     PUT req%v key[%v] val[%v] existed[%v]\n", kv.name, args.Req, args.Key, args.Value, existed)
 
-  if !existed || result.Err == ErrWrongGroup {
-    shard := key2shard(args.Key)
-    kv.mu.Lock()
-    result, existed = kv.req_memo[args.Req]
-    if !existed || result.Err == ErrWrongGroup {
-      op := Op{Operation: PUT, Key: args.Key, Val: args.Value, Req: args.Req, Shard: shard}
+  if !existed {
+    kv.config_mu.Lock()
+    gid := kv.last_cfig.Shards[args.Shard]
+    kv.config_mu.Unlock()
+
+    if kv.gid == gid {
+      op := Op{Operation: PUT, Key: args.Key, Val: args.Value, Req: args.Req, Shard: args.Shard}
       if args.DoHash {
     		op.Operation = PUTHASH
     	}
       result = kv.catch_up(op)
       log.Printf("[%v]     PUT req%v key[%v] val[%v] existed[%v]\n", kv.name, args.Req, args.Key, args.Value, existed)
+    } else {
+      reply.Err = ErrWrongGroup
+      return nil
     }
-    kv.mu.Unlock()
   }
 
   reply.Err = result.Err
@@ -322,17 +368,20 @@ func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 
 func (kv *ShardKV) Sync(args *SyncArgs, reply *SyncReply) error {
 
-  kv.db_memo_mu.Lock()
-  db_copy, ok := kv.db_memo[args.ConfigNum]
-  kv.db_memo_mu.Unlock()
+  kv.sync_mu.Lock()
+  db_copy, ok1 := kv.db_memo[args.ConfigNum]
+  old_req_copy, ok2 := kv.old_req_memo[args.ConfigNum]
+  kv.sync_mu.Unlock()
 
-  if ok {
+  if ok1 && ok2 {
 		reply.DBCopy = db_copy
+    reply.ReqCopy = old_req_copy
     reply.Err = OK
 	} else {
     reply.Err = ErrNoDBCopy
   }
 	return nil
+
 }
 
 //
@@ -341,33 +390,27 @@ func (kv *ShardKV) Sync(args *SyncArgs, reply *SyncReply) error {
 //
 func (kv *ShardKV) tick() {
 
-	latest_cfig := kv.sm.Query(-1)
-  req := ReqIndex{ReqNum: latest_cfig.Num, UUID: int64(0)}
-
-  kv.config_mu.Lock()
-  config_id := kv.last_cfig.Num
-  kv.config_mu.Unlock()
-
-	// kv.req_memo_mu.Lock()
-  // _, existed := kv.req_memo[req]
-  // kv.req_memo_mu.Unlock()
   log.Printf("[%v] tick \n", kv.name)
 
-  if config_id != latest_cfig.Num {
+	latest_cfig := kv.sm.Query(-1)
+  kv.config_mu.RLock()
+  if latest_cfig.Num == kv.last_cfig.Num {
+    kv.config_mu.RUnlock()
+    log.Printf("[%v] tick no change\n", kv.name)
+    return
+  }
+  kv.config_mu.RUnlock()
 
-    kv.mu.Lock()
-    log.Printf("[%v] tick catch up\n", kv.name)
-    _, existed := kv.req_memo[req]
-    if !existed {
-      op := Op{Operation: CONFIG, ConfigNum: latest_cfig.Num, Req: req}
-      kv.catch_up(op)
-    }
-    kv.mu.Unlock()
+  req := ReqIndex{ReqNum: latest_cfig.Num, UUID: int64(0)}
 
-    kv.req_memo_mu.Lock()
-    kv.free_req(req)
-    kv.req_memo_mu.Unlock()
-	}
+  op := Op{Operation: CONFIG, ConfigNum: latest_cfig.Num, Req: req}
+  log.Printf("[%v] tick catch up      --- \n", kv.name)
+  kv.catch_up(op)
+  log.Printf("[%v] tick catch up done ---\n", kv.name)
+
+  kv.req_memo_mu.Lock()
+  kv.free_req(req)
+  kv.req_memo_mu.Unlock()
 }
 
 
@@ -396,6 +439,7 @@ func StartServer(gid int64, shardmasters []string,
   kv.gid = gid
   kv.sm = shardmaster.MakeClerk(shardmasters)
   kv.name = servers[me][28:]
+  kv.old_req_memo = make(map[int]map[ReqIndex]GeneralReply)
 
   // Your initialization code here.
   // Don't call Join().
@@ -403,6 +447,7 @@ func StartServer(gid int64, shardmasters []string,
   kv.req_memo = make(map[ReqIndex]GeneralReply)
   kv.db = make(map[string]string)
   kv.last_seq = -1
+  kv.newest_cfig_num = 0
 
   rpcs := rpc.NewServer()
   rpcs.Register(kv)
