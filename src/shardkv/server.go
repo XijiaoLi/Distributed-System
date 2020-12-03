@@ -201,7 +201,7 @@ func (kv *ShardKV) catch_up(op Op) GeneralReply {
     decided, logger = kv.px.Status(kv.last_seq)
     if !decided {
       kv.px.Start(kv.last_seq, op)
-      nap := 10 * time.Millisecond
+      nap := 5 * time.Millisecond
       for {
         decided, logger = kv.px.Status(kv.last_seq)
         if decided {
