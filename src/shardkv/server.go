@@ -50,7 +50,6 @@ type ShardKV struct {
   // Your definitions here.
   last_cfig shardmaster.Config
   db_memo map[int]map[string]string
-  old_req_memo map[int]map[ReqIndex]GeneralReply
   req_memo map[ReqIndex]GeneralReply
   db map[string]string
   last_seq int
@@ -58,7 +57,7 @@ type ShardKV struct {
   name string
   config_mu sync.Mutex
   req_memo_mu sync.Mutex
-  sync_mu sync.Mutex
+  db_memo_mu sync.Mutex
 
 }
 
@@ -78,49 +77,31 @@ func (kv *ShardKV) update_config(latest int) {
 			continue
 		}
 
-    wg := 2
+    log.Printf("[%v] update_config curr ConfigNum query!!!! [%v]\n", kv.name, config.Num)
+    next_cfig := kv.sm.Query(config.Num + 1)
+    log.Printf("[%v] update_config curr ConfigNum query end!!!![%v]\n", kv.name, config.Num)
 
     go func(config shardmaster.Config){
       db_copy := make(map[string]string)
-
       for k, v := range kv.db {
         if config.Shards[key2shard(k)] == kv.gid {
           db_copy[k] = v
         }
       }
-
-      kv.sync_mu.Lock()
+      kv.db_memo_mu.Lock()
+      // log.Printf("[%v] update_config get db_memo_mu\n", kv.name)
       kv.db_memo[config.Num] = db_copy
-      kv.sync_mu.Unlock()
-      wg -= 1
+      kv.db_memo_mu.Unlock()
     }(config)
 
-    go func(config shardmaster.Config){
-      old_req_copy := make(map[ReqIndex]GeneralReply)
-
-      kv.req_memo_mu.Lock()
-      for req, rep := range kv.req_memo {
-        old_req_copy[req] = rep
-      }
-      kv.req_memo_mu.Unlock()
-
-      kv.sync_mu.Lock()
-      kv.old_req_memo[config.Num] = old_req_copy
-      kv.sync_mu.Unlock()
-      wg -= 1
-    }(config)
-
-    log.Printf("[%v] update_config curr ConfigNum query!!!! [%v]\n", kv.name, config.Num)
-    next_cfig := kv.sm.Query(config.Num + 1)
-    log.Printf("[%v] update_config curr ConfigNum query end!!!![%v]\n", kv.name, config.Num)
+    // log.Printf("[%v] update_config copied my db\n", kv.name)
 
     ga := make(map[int64]bool)
 
     for i, old_gid := range config.Shards {
-      log.Printf("[%v] update_config get data from old_gid[%v]\n", kv.name, old_gid)
-
       new_gid := next_cfig.Shards[i]
       if new_gid != old_gid && new_gid == kv.gid && !ga[old_gid] {
+        log.Printf("[%v] update_config get data from old_gid[%v]\n", kv.name, old_gid)
         ga[old_gid] = true
         for done:=false; !done; {
           for _, old_server := range config.Groups[old_gid] {
@@ -128,16 +109,9 @@ func (kv *ShardKV) update_config(latest int) {
             var reply SyncReply
             ok := call(old_server, "ShardKV.Sync", args, &reply)
             if ok && reply.Err == OK {
-              for wg > 0 {}
               for k, v := range reply.DBCopy {
                 kv.db[k] = v
       				}
-              kv.req_memo_mu.Lock()
-              for req, rep := range reply.ReqCopy {
-                kv.req_memo[req] = rep
-      				}
-              kv.req_memo_mu.Unlock()
-
               done = true
               break
             }
@@ -149,7 +123,7 @@ func (kv *ShardKV) update_config(latest int) {
     log.Printf("[%v] new ConfigNum[%v]\n", kv.name, config.Num)
   } // end of for kv.last_cfig.Num < latest
   kv.last_cfig = config
-  log.Printf("[%v] done! ConfigNum[%v]\n", kv.name, kv.last_cfig.Num)
+  log.Printf("[%v] DONE! ConfigNum[%v]\n", kv.name, kv.last_cfig.Num)
   kv.config_mu.Unlock()
 }
 
@@ -348,14 +322,12 @@ func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 
 func (kv *ShardKV) Sync(args *SyncArgs, reply *SyncReply) error {
 
-  kv.sync_mu.Lock()
-  db_copy, ok1 := kv.db_memo[args.ConfigNum]
-  old_req_copy, ok2 := kv.old_req_memo[args.ConfigNum]
-  kv.sync_mu.Unlock()
+  kv.db_memo_mu.Lock()
+  db_copy, ok := kv.db_memo[args.ConfigNum]
+  kv.db_memo_mu.Unlock()
 
-  if ok1 && ok2 {
+  if ok {
 		reply.DBCopy = db_copy
-    reply.ReqCopy = old_req_copy
     reply.Err = OK
 	} else {
     reply.Err = ErrNoDBCopy
@@ -423,9 +395,7 @@ func StartServer(gid int64, shardmasters []string,
   kv.me = me
   kv.gid = gid
   kv.sm = shardmaster.MakeClerk(shardmasters)
-  kv.name = servers[me][29:]
-  kv.old_req_memo = make(map[int]map[ReqIndex]GeneralReply)
-
+  kv.name = servers[me][28:]
 
   // Your initialization code here.
   // Don't call Join().
