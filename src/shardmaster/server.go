@@ -17,7 +17,7 @@ import (
 )
 
 type ShardMaster struct {
-  mu sync.Mutex
+  mu sync.RWMutex
   l net.Listener
   me int
   dead bool // for testing
@@ -191,6 +191,11 @@ func (sm *ShardMaster) interpret_log(op Op) {
     sm.gid_nshards_counter[old_gid] -= 1
     sm.gid_nshards_counter[op.GroupId] += 1
   } // end of switch
+  // fmt.Printf("\n-----\n")
+  // for _,c := range sm.configs {
+  //   fmt.Printf("%v ", c.Num)
+  // }
+  // fmt.Printf("\n-----\n")
 }
 
 func (sm *ShardMaster) catch_up (op Op) {
@@ -205,11 +210,11 @@ func (sm *ShardMaster) catch_up (op Op) {
       sm.px.Start(sm.last_seq, op)
       nap := 10 * time.Millisecond
       for {
-        time.Sleep(nap)
         decided, log = sm.px.Status(sm.last_seq)
         if decided {
           break
         }
+        time.Sleep(nap)
         if nap < 10 * time.Second {
           nap *= 2
         }
@@ -266,19 +271,31 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) error {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) error {
   // Your code here.
+
+  sm.mu.RLock()
+
+  if args.Num >= 0 && args.Num < len(sm.configs) {
+    reply.Config = sm.configs[args.Num]
+    sm.mu.RUnlock()
+    return nil
+  }
+
+  sm.mu.RUnlock()
+
+  op := Op{Operation: QUERY, ConfigNum: args.Num, Req: nrand()}
+
   sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-  op := Op{Operation: QUERY, ConfigNum: args.Num, Req: nrand()}
   sm.catch_up(op)
-
-  sm.px.Done(sm.last_seq)
 
   if op.ConfigNum >= 0 && op.ConfigNum < len(sm.configs) {
     reply.Config = sm.configs[op.ConfigNum]
   } else {
     reply.Config = sm.configs[len(sm.configs) - 1]
   }
+
+  sm.px.Done(sm.last_seq)
 
   return nil
 }
