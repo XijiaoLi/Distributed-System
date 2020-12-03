@@ -58,6 +58,7 @@ type SyncArgs struct {
 type SyncReply struct {
   Err Err
   DBCopy map[string]string
+  ReqCopy map[ReqIndex]GeneralReply
 }
 
 type ReqIndex struct {

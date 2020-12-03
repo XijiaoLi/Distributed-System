@@ -5,6 +5,8 @@ import "net/rpc"
 import "time"
 import "sync"
 import "fmt"
+import "log"
+
 
 type Clerk struct {
   mu sync.Mutex // one RPC at a time
@@ -97,6 +99,7 @@ func (ck *Clerk) Get(key string) string {
       for _, srv := range servers {
         var reply GetReply
         ok := call(srv, "ShardKV.Get", args, &reply)
+        log.Printf("[CLI]     GET reply%v\n", reply)
         if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
           return reply.Value
         }
@@ -133,6 +136,7 @@ func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
       for _, srv := range servers {
         var reply PutReply
         ok := call(srv, "ShardKV.Put", args, &reply)
+        log.Printf("[CLI]     PUT reply%v\n", reply)
         if ok && reply.Err == OK {
           return reply.PreviousValue
         }
