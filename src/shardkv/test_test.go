@@ -81,8 +81,6 @@ func setup(tag string, unreliable bool) ([]string, []int64, [][]string, [][]*Sha
 
 func TestBasic(t *testing.T) {
   smh, gids, ha, _, clean := setup("basic", false)
-  fmt.Printf("%v\n----------\n%v\n----------\n%v\n\n", smh, gids, ha)
-
   defer clean()
 
   fmt.Printf("Test: Basic Join/Leave ...\n")
@@ -108,7 +106,6 @@ func TestBasic(t *testing.T) {
     keys[i] = strconv.Itoa(rand.Int())
     vals[i] = strconv.Itoa(rand.Int())
     ck.Put(keys[i], vals[i])
-    fmt.Printf("Test put\n")
   }
 
   // are keys still there after joins?
@@ -227,14 +224,12 @@ func TestLimp(t *testing.T) {
   for i := 0; i < len(keys); i++ {
     keys[i] = strconv.Itoa(rand.Int())
     vals[i] = strconv.Itoa(rand.Int())
-    fmt.Printf("Test put\n")
     ck.Put(keys[i], vals[i])
   }
 
   // are keys still there after joins?
   for g := 1; g < len(gids); g++ {
     mck.Join(gids[g], ha[g])
-    fmt.Printf("\n------------ %v ---------------\n\n", ha[g])
     time.Sleep(1 * time.Second)
     for i := 0; i < len(keys); i++ {
       v := ck.Get(keys[i])
@@ -244,7 +239,6 @@ func TestLimp(t *testing.T) {
       }
       vals[i] = strconv.Itoa(rand.Int())
       ck.Put(keys[i], vals[i])
-      fmt.Printf("----- test1 ----- [%v][%v]\n", g, i)
     }
   }
 
@@ -253,7 +247,6 @@ func TestLimp(t *testing.T) {
     mck.Leave(gids[g])
     time.Sleep(2 * time.Second)
     for i := 0; i < len(sa[g]); i++ {
-      fmt.Printf("server killed [%v]\n", ha[g][i])
       sa[g][i].kill()
     }
     for i := 0; i < len(keys); i++ {
@@ -264,7 +257,6 @@ func TestLimp(t *testing.T) {
       }
       vals[i] = strconv.Itoa(rand.Int())
       ck.Put(keys[i], vals[i])
-      fmt.Printf("----- test2 ----- [%v][%v]\n", g, i)
     }
   }
 
