@@ -16,7 +16,7 @@ const (
   OK = "OK"
   ErrNoKey = "ErrNoKey"
   ErrWrongGroup = "ErrWrongGroup"
-  ErrNoDBCopy = "ErrNoDBCopy"
+  ErrNoCache = "ErrNoCache"
   PUT = "Put"
   PUTHASH = "PutHash"
   GET = "Get"
@@ -53,8 +53,7 @@ type GetReply struct {
 }
 
 type SyncArgs struct {
-  Err Err
-  ConfigNum int
+  CacheIdx CacheIndex
 }
 
 type SyncReply struct {
@@ -72,6 +71,16 @@ type ReqIndex struct {
 type GeneralReply struct {
   Err Err
   Value string
+}
+
+type CacheIndex struct {
+  ConfigNum int
+  GroupId int64
+}
+
+type Cache struct {
+  DB map[string]string
+  Req map[ReqIndex]GeneralReply
 }
 
 func hash(s string) uint32 {

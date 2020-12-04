@@ -49,8 +49,7 @@ type ShardKV struct {
 
   // Your definitions here.
   last_cfig shardmaster.Config
-  db_memo map[int]map[string]string
-  old_req_memo map[int]map[ReqIndex]GeneralReply
+  cache_memo map[CacheIndex]Cache
   req_memo map[ReqIndex]GeneralReply
   db map[string]string
   last_seq int
@@ -60,7 +59,6 @@ type ShardKV struct {
   req_memo_mu sync.Mutex
   sync_mu sync.Mutex
   db_mu sync.Mutex
-  newest_cfig_num int
 
 }
 
@@ -84,6 +82,7 @@ func (kv *ShardKV) update_config(latest int) {
     log.Printf("[%v] update_config curr ConfigNum query end === [%v]\n", kv.name, config.Num)
 
     db_copy := make(map[string]string)
+    old_req_copy := make(map[ReqIndex]GeneralReply)
 
     kv.db_mu.Lock()
     for k, v := range kv.db {
@@ -93,39 +92,37 @@ func (kv *ShardKV) update_config(latest int) {
     }
     kv.db_mu.Unlock()
 
-    kv.sync_mu.Lock()
-    kv.db_memo[config.Num] = db_copy
-    kv.sync_mu.Unlock()
-
-    old_req_copy := make(map[ReqIndex]GeneralReply)
-
     kv.req_memo_mu.Lock()
     for req, rep := range kv.req_memo {
-      if req.UUID != 0 {
-        old_req_copy[req] = rep
-      }
+      old_req_copy[req] = rep
     }
     kv.req_memo_mu.Unlock()
 
+    idx := CacheIndex{ConfigNum: config.Num, GroupId: kv.gid}
+
     kv.sync_mu.Lock()
-    kv.old_req_memo[config.Num] = old_req_copy
+    kv.cache_memo[idx] = Cache{DB: db_copy, Req: old_req_copy}
     kv.sync_mu.Unlock()
 
     log.Printf("[%v] update_config copied my db\n", kv.name)
 
-    ga := make(map[int64]bool)
-
     for i, old_gid := range config.Shards {
       new_gid := next_cfig.Shards[i]
-      if new_gid != old_gid && new_gid == kv.gid && !ga[old_gid] {
+      if new_gid != old_gid && new_gid == kv.gid {
+        idx = CacheIndex{ConfigNum: config.Num, GroupId: old_gid}
+        args := &SyncArgs{CacheIdx: idx}
+        var reply SyncReply
+
         log.Printf("[%v] update_config get data from old_gid[%v]\n", kv.name, old_gid)
-        ga[old_gid] = true
-        for done:=false; !done; {
+
+        out:
+        for _, done:=kv.cache_memo[idx]; !done; {
+
           for _, old_server := range config.Groups[old_gid] {
-            args := &SyncArgs{ConfigNum: config.Num}
-            var reply SyncReply
             ok := call(old_server, "ShardKV.Sync", args, &reply)
             if ok && reply.Err == OK {
+              kv.cache_memo[idx] = Cache{DB: reply.DBCopy, Req: reply.ReqCopy}
+
               kv.db_mu.Lock()
               for k, v := range reply.DBCopy {
                 kv.db[k] = v
@@ -138,8 +135,28 @@ func (kv *ShardKV) update_config(latest int) {
               }
               kv.req_memo_mu.Unlock()
 
-              done = true
-              break
+              break out
+            }
+          }
+
+          for _, peer := range config.Groups[kv.gid] {
+            ok := call(peer, "ShardKV.Sync", args, &reply)
+            if ok && reply.Err == OK {
+              kv.cache_memo[idx] = Cache{DB: reply.DBCopy, Req: reply.ReqCopy}
+
+              kv.db_mu.Lock()
+              for k, v := range reply.DBCopy {
+                kv.db[k] = v
+              }
+              kv.db_mu.Unlock()
+
+              kv.req_memo_mu.Lock()
+              for req, rep := range reply.ReqCopy {
+                kv.req_memo[req] = rep
+              }
+              kv.req_memo_mu.Unlock()
+
+              break out
             }
           }
         }
@@ -369,16 +386,15 @@ func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 func (kv *ShardKV) Sync(args *SyncArgs, reply *SyncReply) error {
 
   kv.sync_mu.Lock()
-  db_copy, ok1 := kv.db_memo[args.ConfigNum]
-  old_req_copy, ok2 := kv.old_req_memo[args.ConfigNum]
+  cache, ok := kv.cache_memo[args.CacheIdx]
   kv.sync_mu.Unlock()
 
-  if ok1 && ok2 {
-		reply.DBCopy = db_copy
-    reply.ReqCopy = old_req_copy
+  if ok {
+		reply.DBCopy = cache.DB
+    reply.ReqCopy = cache.Req
     reply.Err = OK
 	} else {
-    reply.Err = ErrNoDBCopy
+    reply.Err = ErrNoCache
   }
 	return nil
 
@@ -439,15 +455,13 @@ func StartServer(gid int64, shardmasters []string,
   kv.gid = gid
   kv.sm = shardmaster.MakeClerk(shardmasters)
   kv.name = servers[me][28:]
-  kv.old_req_memo = make(map[int]map[ReqIndex]GeneralReply)
 
   // Your initialization code here.
   // Don't call Join().
-  kv.db_memo = make(map[int]map[string]string)
+  kv.cache_memo = make(map[CacheIndex]Cache)
   kv.req_memo = make(map[ReqIndex]GeneralReply)
   kv.db = make(map[string]string)
   kv.last_seq = -1
-  kv.newest_cfig_num = 0
 
   rpcs := rpc.NewServer()
   rpcs.Register(kv)
