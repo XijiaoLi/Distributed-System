@@ -295,8 +295,12 @@ func (kv *ShardKV) catch_up(op Op) GeneralReply {
 
   kv.req_memo_mu.Lock()
   // log.Printf("[%v]     catch_up return val for req%v\n", kv.name, op.Req)
-  ret := kv.req_memo[op.Req]
+  ret, exist := kv.req_memo[op.Req]
   kv.req_memo_mu.Unlock()
+
+  if !exist {
+    ret = GeneralReply{Err: ErrWrongGroup, Value: ""}
+  }
 
   return ret
 }
