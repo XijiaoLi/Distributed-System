@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"hash/fnv"
 	"math/rand"
+	// "fmt"
 )
 
 type State struct {
@@ -53,6 +54,18 @@ func (s *State) AddNode(address Address, node Node, blockList []Address) {
 	s.blockLists[address] = blockList
 	s.nodeHash += node.Hash()
 	return
+}
+
+func (s *State) UpdateNode(address Address, node Node) {
+	if old, ok := s.nodes[address]; ok {
+		s.nodeHash -= old.Hash()
+	} else {
+		panic("node does not exist")
+	}
+
+	s.nodes[address] = node
+	s.nodeHash += node.Hash()
+	s.Receive(node.HandlerResponse())
 }
 
 func (s *State) Nodes() map[Address]Node {
@@ -174,12 +187,39 @@ func (s *State) isMessageReachable(index int) (bool, *State) {
 
 func (s *State) HandleMessage(index int, deleteMessage bool) (result []*State) {
 	//TODO: implement it
-	panic("implement me")
+	nextStates := make([]*State, 0, 4)
+
+	message := s.Network[index]
+	to := message.To()
+	node := s.nodes[to]
+
+	new_nodes := node.MessageHandler(message)
+	if new_nodes == nil {
+		return nil
+	}
+
+	for _, n := range new_nodes {
+		newState := s.Inherit(HandleEvent(message))
+		newState.UpdateNode(to, n)
+		if deleteMessage {
+			newState.DeleteMessage(index)
+		}
+		nextStates = append(nextStates, newState)
+	}
+
+	return nextStates
+
 }
 
 func (s *State) DeleteMessage(index int) {
-	//TODO: implement it
-	panic("implement me")
+	// Remove the i-th message
+	message := s.Network[index]
+	s.Network[index] = s.Network[len(s.Network)-1]
+	s.Network = s.Network[:len(s.Network)-1]
+
+	// remove from the hash
+	s.networkHash -= message.Hash()
+	s.hashSorted = false
 }
 
 func (s *State) Receive(messages []Message) {
@@ -210,14 +250,20 @@ func (s *State) NextStates() []*State {
 
 		// TODO: Drop off a message
 		if s.isDropOff {
+			newState = s.Inherit(DropOffEvent(s.Network[i]))
+			nextStates = append(nextStates, newState)
+			newState.DeleteMessage(i)
 		}
 
 		// TODO: Message arrives Normally. (use HandleMessage)
+		newStates := s.HandleMessage(i, true)
+		nextStates = append(nextStates, newStates...)
 
 		// TODO: Message arrives but the message is duplicated. The same message may come later again
 		// (use HandleMessage)
 		if s.isDuplicate {
-
+			newStates = s.HandleMessage(i, false)
+			nextStates = append(nextStates, newStates...)
 		}
 
 	}
@@ -228,6 +274,10 @@ func (s *State) NextStates() []*State {
 		node := s.nodes[address]
 
 		//TODO: call the timer (use TriggerNodeTimer)
+		newStates := s.TriggerNodeTimer(address, node)
+		if newStates != nil {
+			nextStates = append(nextStates, newStates...)
+		}
 	}
 
 	return nextStates
@@ -235,7 +285,21 @@ func (s *State) NextStates() []*State {
 
 func (s *State) TriggerNodeTimer(address Address, node Node) []*State {
 	//TODO: implement it
-	panic("implement me")
+	nextStates := make([]*State, 0, 4)
+	new_nodes := node.TriggerTimer()
+
+	if new_nodes == nil {
+		return nil
+	}
+
+	for _, n := range new_nodes {
+		trigger_event := TriggerEvent(address, n.NextTimer())
+		newState := s.Inherit(trigger_event)
+		newState.UpdateNode(address, n)
+		nextStates = append(nextStates, newState)
+	}
+
+	return nextStates
 
 }
 
@@ -258,11 +322,33 @@ func (s *State) RandomNextState() *State {
 		}
 
 		//TODO: handle message and return one state
+		nextStates := make([]*State, 0, 4)
+
+		if s.isDropOff {
+			newState = s.Inherit(DropOffEvent(s.Network[roll]))
+			newState.DeleteMessage(roll)
+			nextStates = append(nextStates, newState)
+		}
+
+		newStates := s.HandleMessage(roll, true)
+		nextStates = append(nextStates, newStates...)
+
+		if s.isDuplicate {
+			newStates = s.HandleMessage(roll, false)
+			nextStates = append(nextStates, newStates...)
+		}
+
+		i := rand.Intn(len(nextStates))
+		return nextStates[i]
 	}
 
 	// TODO: trigger timer and return one state
 	address := timerAddresses[roll-len(s.Network)]
 	node := s.nodes[address]
+
+	newStates := s.TriggerNodeTimer(address, node)
+	i := rand.Intn(len(newStates))
+	return newStates[i]
 
 }
 
