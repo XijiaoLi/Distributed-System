@@ -251,8 +251,8 @@ func (s *State) NextStates() []*State {
 		// TODO: Drop off a message
 		if s.isDropOff {
 			newState = s.Inherit(DropOffEvent(s.Network[i]))
-			nextStates = append(nextStates, newState)
 			newState.DeleteMessage(i)
+			nextStates = append(nextStates, newState)
 		}
 
 		// TODO: Message arrives Normally. (use HandleMessage)
@@ -310,6 +310,11 @@ func (s *State) RandomNextState() *State {
 			continue
 		}
 		timerAddresses = append(timerAddresses, addr)
+	}
+
+	if len(s.Network) + len(timerAddresses) == 0 {
+		newState := s.Inherit(EmptyEvent())
+			return newState
 	}
 
 	roll := rand.Intn(len(s.Network) + len(timerAddresses))
