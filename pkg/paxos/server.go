@@ -2,7 +2,7 @@ package paxos
 
 import (
 	"coms4113/hw5/pkg/base"
-	"fmt"
+	// "fmt"
 )
 
 const (
@@ -78,202 +78,174 @@ func (server *Server) find_peer_id(addr base.Address) int {
 }
 
 func (server *Server) MessageHandler(message base.Message) []base.Node {
-	//TODO: implement it
-	if server.agreedValue != nil {
-		return []base.Node{server}
-	}
-	// request handler ------------------------------------------------------------------------
+	//implement it
+	if !base.IsNil(server.agreedValue) {
+    return []base.Node{server}
+  }
 
-	pro_req, ok := message.(*ProposeRequest)
+	propose_request, ok := message.(*ProposeRequest)
 	if ok {
 		newNode := server.copy()
-		pro_resp := &ProposeResponse{
-			CoreMessage: base.MakeCoreMessage(pro_req.To(), pro_req.From()),
-			SessionId: pro_req.SessionId,
+		propose_reply := &ProposeResponse{
+			CoreMessage: base.MakeCoreMessage(propose_request.To(), propose_request.From()),
+			SessionId: propose_request.SessionId,
 		}
 
-		if pro_req.N <= server.n_p {
-			pro_resp.Ok = false
-			pro_resp.N_p = server.n_p
+		if propose_request.N <= server.n_p {
+			propose_reply.N_p = server.n_p
+			propose_reply.Ok = false
 		} else {
-			newNode.n_p = pro_req.N
-			pro_resp.Ok = true
-			pro_resp.N_a = server.n_a
-			pro_resp.V_a = server.v_a
+			newNode.n_p = propose_request.N
+			propose_reply.V_a = server.v_a
+			propose_reply.N_a = server.n_a
+			propose_reply.Ok = true
 		}
 
-		newNode.SetSingleResponse(pro_resp)
+		newNode.SetSingleResponse(propose_reply)
 		return []base.Node{newNode}
 	}
 
-	acc_req, ok := message.(*AcceptRequest)
+	accept_request, ok := message.(*AcceptRequest)
 	if ok {
 		newNode := server.copy()
-		acc_resp := &AcceptResponse{
-			CoreMessage: base.MakeCoreMessage(acc_req.To(), acc_req.From()),
-			SessionId: acc_req.SessionId,
+
+		accept_reply := &AcceptResponse{
+			CoreMessage: base.MakeCoreMessage(accept_request.To(), accept_request.From()),
+			SessionId: accept_request.SessionId,
 		}
 
-		if acc_req.N < server.n_p {
-			acc_resp.Ok = false
-			acc_resp.N_p = server.n_p
+		if accept_request.N < server.n_p {
+			accept_reply.N_p = server.n_p
+			accept_reply.Ok = false
 		} else {
-			newNode.n_p = acc_req.N
-			newNode.n_a = acc_req.N
-			newNode.v_a = acc_req.V
-			acc_resp.Ok = true
+			newNode.n_p = accept_request.N
+			newNode.n_a = accept_request.N
+			newNode.v_a = accept_request.V
+			accept_reply.Ok = true
 		}
 
-		newNode.SetSingleResponse(acc_resp)
+		newNode.SetSingleResponse(accept_reply)
 		return []base.Node{newNode}
 	}
 
-	dec_req, ok := message.(*DecideRequest)
+	// handler of the decide request
+	decide_request, ok := message.(*DecideRequest)
 	if ok {
 		newNode := server.copy()
-		newNode.agreedValue = dec_req.V
+		newNode.agreedValue = decide_request.V
 		return []base.Node{newNode}
 	}
 
-	// response handler ------------------------------------------------------------------------
-
-	// case 4: receive a ProposeResponse
-	pro_resp, ok := message.(*ProposeResponse)
+	propose_reply, ok := message.(*ProposeResponse)
 	if ok {
-		// 4.1 ignore the message: wrong session id / server not at the Propose Phase / repeated response
-		if pro_resp.SessionId != server.proposer.SessionId || server.proposer.Phase != Propose {
+
+		if server.proposer.Phase != Propose {
 			return []base.Node{server}
 		}
 
-		peer_id := server.find_peer_id(pro_resp.From())
-		fmt.Printf("peer id: %v\n", peer_id)
-		if peer_id  == -1 || server.proposer.Responses[peer_id] {
+		peer_index := server.find_peer_id(propose_reply.From())
+		if server.proposer.Responses[peer_index] {
 			return []base.Node{server}
 		}
 
 		newNodes := make([]base.Node, 0, 4)
 		newNode := server.copy()
-		newNode.proposer.ResponseCount++
-		newNode.proposer.Responses[peer_id] = true
+		newNode.proposer.Responses[peer_index] = true
+		newNode.proposer.ResponseCount ++
 
-		if pro_resp.Ok {
-			// 4.2 handle the message: prepare is ok
-
-			// 4.2.1 server remains at Propose Phase
-			newNode.proposer.SuccessCount++
-			if newNode.proposer.N_a_max < pro_resp.N_a {
-				newNode.proposer.N_a_max = pro_resp.N_a
-				newNode.proposer.V = pro_resp.V_a
+		if propose_reply.Ok {
+			newNode.proposer.SuccessCount ++
+			if newNode.proposer.N_a_max < propose_reply.N_a {
+				newNode.proposer.N_a_max = propose_reply.N_a
+				newNode.proposer.V = propose_reply.V_a
 			}
 
-		} else {
-			// 4.3 handle the message: prepare declined
-			if server.n_p < pro_resp.N_p {
-				newNode.n_p = pro_resp.N_p
-			}
-		}
+			if newNode.proposer.SuccessCount > len(server.peers)/2 {
+				newNode_acc := newNode.copy()
+				newNode_acc.proposer.Phase = Accept
+				newNode_acc.proposer.Responses = make([]bool, len(server.peers))
+				newNode_acc.proposer.ResponseCount = 0
+				newNode_acc.proposer.SuccessCount = 0
 
-		if newNode.proposer.SuccessCount > len(server.peers)/2 {
-			// 4.2.2 server moves to at Accept Phase
-			newNode2 := newNode.copy()
-			newNode2.proposer.Phase = Accept
-			newNode2.proposer.Responses = make([]bool, len(server.peers))
-			newNode2.proposer.ResponseCount = 0
-			newNode2.proposer.SuccessCount = 0
-
-			msg := make([]base.Message, len(server.peers))
-			for i, p := range server.peers {
-				m := &AcceptRequest{
-					CoreMessage: base.MakeCoreMessage(server.peers[server.me], p),
-					N: server.proposer.N,
-					V: server.proposer.V,
-					SessionId: server.proposer.SessionId,
+				msg := make([]base.Message, len(server.peers))
+				from_me := server.peers[server.me]
+				for i, to_peer := range server.peers {
+					newMsg := &AcceptRequest {
+						CoreMessage: base.MakeCoreMessage(from_me, to_peer),
+						N: newNode_acc.proposer.N,
+						V: newNode_acc.proposer.V,
+						SessionId: newNode_acc.proposer.SessionId,
+					}
+					msg[i] = newMsg
 				}
-				msg[i] = m
+				newNode_acc.SetResponse(msg)
+				newNodes = append(newNodes, newNode_acc)
 			}
-
-			newNode2.SetResponse(msg)
-			newNodes = append(newNodes, newNode2) // 4.2.2
-		}
-
-		if newNode.proposer.ResponseCount == len(server.peers) {
-			newNode.StartPropose()
+		} else {
+			if newNode.n_p < propose_reply.N_p {
+				newNode.n_p = propose_reply.N_p
+			}
 		}
 		newNodes = append(newNodes, newNode)
-
-		fmt.Printf("%v\n", newNodes)
-
 		return newNodes
 	}
 
-	// --------------
 
-	acc_resp, ok := message.(*AcceptResponse)
+	accept_reply, ok := message.(*AcceptResponse)
 	if ok {
-		// 5.1 ignore the message: wrong session id / server not at the Accept Phase / repeated response
-		if acc_resp.SessionId != server.proposer.SessionId || server.proposer.Phase != Accept { //
+		if server.proposer.Phase != Accept {
 			return []base.Node{server}
 		}
 
-		peer_id := server.find_peer_id(acc_resp.From())
-		if peer_id  == -1 || server.proposer.Responses[peer_id] {
+		peer_index := server.find_peer_id(accept_reply.From())
+		if server.proposer.Responses[peer_index] {
 			return []base.Node{server}
 		}
 
 		newNodes := make([]base.Node, 0, 4)
 		newNode := server.copy()
-		newNode.proposer.ResponseCount++
-		newNode.proposer.Responses[peer_id] = true
+		newNode.proposer.Responses[peer_index] = true
+		newNode.proposer.ResponseCount += 1
 
-		if acc_resp.Ok {
-			// 5.2 handle the message: accept is ok
+		if accept_reply.Ok {
+			newNode.proposer.SuccessCount ++
+			if newNode.proposer.SuccessCount > len(server.peers)/2 {
+				newNode_dec := newNode.copy()
+				newNode_dec.proposer.Phase = Decide
+				newNode_dec.proposer.Responses = make([]bool, len(server.peers))
+				newNode_dec.proposer.ResponseCount = 0
+				newNode_dec.proposer.SuccessCount = 0
 
-			// 5.2.1 server remains at Accept Phase
-			newNode.proposer.SuccessCount++
-		} else {
-			// 5.3 handle the message: prepare declined
-			if server.n_p < acc_resp.N_p {
-				newNode.n_p = acc_resp.N_p
-			}
-		}
-
-		if newNode.proposer.SuccessCount > len(server.peers)/2 {
-			// 5.2.2 server moves to at Decide Phase
-			newNode2 := newNode.copy()
-			newNode2.proposer.Phase = Decide
-			newNode2.proposer.Responses = make([]bool, len(server.peers))
-			newNode2.proposer.ResponseCount = 0
-			newNode2.proposer.SuccessCount = 0
-			newNode2.agreedValue = server.proposer.V
-
-			msg := make([]base.Message, len(server.peers))
-			for i, p := range server.peers {
-				m := &DecideRequest{
-					CoreMessage: base.MakeCoreMessage(server.peers[server.me], p),
-					V: server.proposer.V,
-					SessionId: server.proposer.SessionId,
+				msg := make([]base.Message, len(server.peers))
+				from_me := server.peers[server.me]
+				for i, to_peer := range server.peers {
+					m := &DecideRequest {
+						CoreMessage: base.MakeCoreMessage(from_me, to_peer),
+						SessionId: server.proposer.SessionId,
+						V: server.proposer.V,
+					}
+					msg[i] = m
 				}
-				msg[i] = m
+				newNode_dec.SetResponse(msg)
+				newNodes = append(newNodes, newNode_dec)
 			}
-
-			newNode2.SetResponse(msg)
-			newNodes = append(newNodes, newNode2) // 5.2.2
-		}
-
-		if newNode.proposer.ResponseCount == len(server.peers) {
-			newNode.StartPropose()
+		} else {
+			if newNode.n_p < accept_reply.N_p {
+				newNode.n_p = accept_reply.N_p
+			}
 		}
 		newNodes = append(newNodes, newNode)
-
 		return newNodes
 	}
 
-	fmt.Printf("\n\nsomething is wrong!!!\n\n")
-	return []base.Node{server}
+	return []base.Node{server} // should not come here!
 }
 
 // To start a new round of Paxos.
 func (server *Server) StartPropose() {
+	if base.IsNil(server.proposer.InitialValue) {
+    return
+  }
 	//TODO: implement it
 	msg := make([]base.Message, len(server.peers))
 
